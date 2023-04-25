@@ -1,0 +1,555 @@
+#!/usr/bin/python3.8
+
+# Copyright 2023 Lawrence Livermore National Security, LLC and other
+# DFTF Project Developers. See the top-level LICENSE file for details.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import argparse
+import configparser
+import dateutil.parser
+import functools
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import logging
+from math import floor
+import multiprocessing
+import os
+import platform
+import pprint
+import redfish
+import redfish_utilities
+import subprocess
+import sys
+import time
+import queue
+from confluent_kafka import Producer
+from confluent_kafka.serialization import StringSerializer, SerializationContext, MessageField
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
+from confluent_kafka.schema_registry import record_subject_name_strategy
+
+DEBUG2=logging.DEBUG-1
+DEBUG3=logging.DEBUG-2
+logging.addLevelName(DEBUG2, 'DEBUG2')
+logging.addLevelName(DEBUG3, 'DEBUG3')
+
+verbosity_levels = {
+    'critical': logging.CRITICAL,
+    'error': logging.ERROR,
+    'warning': logging.WARNING,
+    'info': logging.INFO,
+    'debug': logging.DEBUG,
+    'debug2': DEBUG2,
+    'debug3': DEBUG3
+}
+
+config = None
+logger = None
+hostname = platform.node()
+
+metrics_schema = """{
+    "name": "RedfishCrayOemSensors",
+    "type": "record",
+    "fields": [
+        {
+            "name": "timestamp",
+            "type": {
+                "type": "long",
+                "logicalType": "timestamp-millis"
+            }
+        },
+        {
+            "name": "Location",
+            "type": "string"
+        },
+        {
+            "name": "Index",
+            "type": "int"
+        },
+        {
+            "name": "ParentalContext",
+            "type": "string"
+        },
+        {
+            "name": "ParentalIndex",
+            "type": "int"
+        },
+        {
+            "name": "PhysicalContext",
+            "type": "string"
+        },
+        {
+            "name": "PhysicalSubContext",
+            "type": "string"
+        },
+        {
+            "name": "DeviceSpecificContext",
+            "type": "string"
+        },
+        {
+            "name": "EventName",
+            "type": "string"
+        },
+        {
+            "name": "Value",
+            "type": "double"
+        }
+    ]
+}
+"""
+
+events_schema = """{
+    "name": "RedfishCrayEvents",
+    "type": "record",
+    "fields": [
+        {
+            "name": "timestamp",
+            "type": {
+                "type": "long",
+                "logicalType": "timestamp-millis"
+            }
+        },
+        {
+            "name": "Location",
+            "type": "string"
+        },
+        {
+            "name": "MessageId",
+            "type": "string"
+        },
+        {
+            "name": "Severity",
+            "type": "string"
+        },
+        {
+            "name": "Message",
+            "type": "string"
+        },
+        {
+            "name": "OriginOfCondition",
+            "type": "string"
+        }
+    ]
+}
+"""
+def find_subscription(session,
+                      subscriptions,
+                      destination,
+                      client_context,
+                      event_types=None,
+                      registries=None):
+    for sub in subscriptions:
+        if sub['Destination'] != destination:
+            continue
+        if event_types is not None and ('EventTypes' not in sub or sub['EventTypes'] != event_types):
+            continue
+        if event_types is None and 'EventTypes' in sub:
+            continue
+        if registries is not None and ('RegistryPrefixes' not in sub or sub['RegistryPrefixes'] != registries):
+            continue
+        if registries is None and 'RegistryPrefixes' in sub:
+            continue
+        if 'Context' not in sub:
+            continue
+        if sub['Context'] != client_context:
+            # It otherwise matches, but the context string is wrong. Delete
+            # it so it will be recreated with the correct name.
+            session.delete(sub['@odata.id'])
+            continue
+        return sub
+    return None
+
+def update_subscriptions(host, destination):
+    """Update subscriptions for 'hosts'
+
+    First what if subscriptions exist for 'host', and only add
+    subscriptions that are missing."""
+
+    session = redfish.redfish_client(base_url="https://"+host,
+                                     username=config.redfish_username,
+                                     password=config.redfish_password,
+                                     default_prefix="/redfish/v1")
+    session.login(auth="session")
+
+    subscriptions = redfish_utilities.get_event_subscriptions(session)
+
+    client_context="lc_metric_events"
+    event_types=["Alert"]
+    registries=["CrayTelemetry"]
+    sub = find_subscription(session, subscriptions, destination,
+                            client_context, event_types, registries)
+    if sub is None:
+        response = redfish_utilities.create_event_subscription(
+            context=session,
+            destination=destination,
+            client_context=client_context,
+            event_types=event_types,
+            registries=registries)
+
+    client_context="lc_other_events"
+    event_types=["Alert"]
+    sub = find_subscription(session, subscriptions, destination,
+                            client_context, event_types)
+    if sub is None:
+        response = redfish_utilities.create_event_subscription(
+            context=session,
+            destination=destination,
+            client_context=client_context,
+            event_types=event_types)
+
+    session.logout()
+
+class Handle_HTTP_Connection(BaseHTTPRequestHandler):
+    def __init__(self, worker_queue, *args, **kwargs):
+        self.worker_queue = worker_queue
+        super().__init__(*args, **kwargs)
+    def log_request(self, code='-', size='-'):
+        # silence internal library messages for each request
+        return
+
+    def do_GET(self):
+        logger.warning("Invalid GET request,\nPath: %s\nHeaders:\n%s\n", str(self.path), str(self.headers))
+        self.send_response_only(405)
+
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        logger.debug(f'queueing POSTed content, content length = {content_length}')
+        self.worker_queue.put((self.path, self.headers, self.client_address, post_data))
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
+
+def run_http_server(worker_queue, ip_address, port):
+    server_address = (ip_address, int(port))
+    handler = functools.partial(Handle_HTTP_Connection, worker_queue)
+    httpd = ThreadingHTTPServer(server_address, handler)
+    logger.debug(f'Starting http server on port {port}')
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    logger.debug('Stopping http server')
+    httpd.server_close()
+
+def removeprefix(string_val, prefix):
+    '''The string class has a removeprefix() method in 3.9+'''
+    if string_val[:len(prefix)] == prefix:
+        return string_val[len(prefix):]
+    else:
+        return string_val
+
+def get_sensors_CrayTelemetry(event):
+    eventname = removeprefix(event['MessageId'], 'CrayTelemetry.')
+    sensor_ignored_count = 0
+    for sensor in event['Oem']['Sensors']:
+        try:
+            timestamp = sensor['Timestamp']
+        except:
+            logger.warning('sensor is missing Timestamp')
+            sensor_ignored_count += 1
+            continue
+        try:
+            ts = dateutil.parser.parse(timestamp)
+        except:
+            logger.warning(f"unable to parse Timestamp {timestamp}")
+            continue
+        ts_millis = round(ts.timestamp()*1000)
+        sensor['timestamp'] = ts_millis
+        if 'Location' not in sensor:
+            logger.warning('sensor is missing Location')
+            sensor_ignored_count += 1
+            continue
+        if 'Value' not in sensor:
+            logger.warning('sensor is missing Value')
+            sensor_ignored_count += 1
+            continue
+        sensor['EventName'] = eventname
+        if 'PhysicalContext' not in sensor:
+            sensor['PhysicalContext'] = ''
+        if 'PhysicalSubContext' not in sensor:
+            sensor['PhysicalSubContext'] = ''
+        if 'DeviceSpecificContext' not in sensor:
+            sensor['DeviceSpecificContext'] = ''
+        if 'ParentalContext' not in sensor:
+            sensor['ParentalContext'] = ''
+        if 'Index' not in sensor:
+            sensor['Index'] = -1
+        if 'ParentalIndex' not in sensor:
+            sensor['ParentalIndex'] = -1
+        logger.log(DEBUG3, f"{sensor['timestamp']} {sensor['Location']:10} {sensor['Index']:4} {sensor['ParentalContext']:20} {sensor['ParentalIndex']:4} {sensor['PhysicalContext']:18} {sensor['PhysicalSubContext']:8} {sensor['DeviceSpecificContext']:18} {sensor['EventName']:15} {sensor['Value']:10}")
+        #logger.debug(f"event sensor count: {sensor_count} (ignored: {sensor_ignored_count})")
+
+        key = (sensor['EventName'], sensor['PhysicalContext'], sensor['PhysicalSubContext'], sensor['DeviceSpecificContext'], sensor['ParentalContext'], sensor['Index'], sensor['ParentalIndex'])
+        yield (key, sensor)
+
+def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_serializer):
+    topic = config.topic_prefix+"craytelemetry"
+    try:
+        producer.produce(topic=topic,
+                         key=string_serializer(hostname,
+                                               SerializationContext(topic, MessageField.KEY)),
+                         value=metrics_serializer(sensor,
+                                               SerializationContext(topic, MessageField.VALUE)),
+                         on_delivery=delivery_report)
+    except KeyboardInterrupt:
+        pass
+    except ValueError:
+        logger.error("invalid input for kafka topic, discarding record")
+
+def handle_event_normal(event, producer, events_serializer, string_serializer, client_address_tuple):
+    try:
+        timestamp = event['EventTimestamp']
+    except:
+        logger.warning('event is missing EventTimestamp')
+        return
+    try:
+        ts = dateutil.parser.parse(timestamp)
+    except:
+        logger.warning(f"unable to parse EventTimestamp {timestamp}")
+        return
+    ts_millis = round(ts.timestamp()*1000)
+    event['timestamp'] = ts_millis
+    event['Location'] = client_address_tuple[0]  # the IP address as a string
+    if 'Message' not in event:
+        event['Message'] = ''
+    if 'MessageId' not in event:
+        event['MessageId'] = ''
+    if 'Severity' not in event:
+        event['Severity'] = ''
+    if 'OriginOfCondition' not in event or '@odata.id' not in event['OriginOfCondition']:
+        event['OriginOfCondition'] = ''
+    else:
+        event['OriginOfCondition'] = event['OriginOfCondition']['@odata.id']
+    logger.log(DEBUG3, f"{event['timestamp']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
+    topic = config.topic_prefix+"crayevents"
+    try:
+        producer.produce(topic=topic,
+                         key=string_serializer(hostname,
+                                               SerializationContext(topic, MessageField.KEY)),
+                         value=events_serializer(event,
+                                                 SerializationContext(topic, MessageField.VALUE)),
+                         on_delivery=delivery_report)
+    except KeyboardInterrupt:
+        pass
+    except ValueError:
+        logger.error("invalid input for kafka topic, discarding record")
+
+def delivery_report(err, msg):
+    """
+    Reports the failure or success of a message delivery.
+
+    Args:
+        err (KafkaError): The error that occurred on None on success.
+
+        msg (Message): The message that was produced or failed.
+
+    Note:
+        In the delivery report callback the Message.key() and Message.value()
+        will be the binary format as encoded by any configured Serializers and
+        not the same object that was passed to produce().
+        If you wish to pass the original object(s) for key and value to delivery
+        report callback we recommend a bound callback or lambda where you pass
+        the objects along.
+    """
+
+    if err is not None:
+        logger.error(f'Delivery failed for record: {err}')
+        return
+    logger.log(DEBUG3, f'record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
+
+def event_is(event, message_id_prefix):
+    prefix_len = len(message_id_prefix)
+    if event['MessageId'][:prefix_len] == message_id_prefix:
+        return True
+    else:
+        return False
+
+def worker_process(worker_queue):
+    logger.debug('start')
+
+    schema_registry_conf = {}
+    schema_registry_conf['url'] = config.schema_registry
+    schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+    avro_serializer_conf = {}
+    avro_serializer_conf['subject.name.strategy'] = record_subject_name_strategy
+    metrics_serializer = AvroSerializer(schema_registry_client,
+                                        metrics_schema,
+                                        to_dict=None,
+                                        conf=avro_serializer_conf)
+    string_serializer = StringSerializer('utf_8')
+    events_serializer = AvroSerializer(schema_registry_client,
+                                       events_schema,
+                                       to_dict=None,
+                                       conf=avro_serializer_conf)
+    producer_conf = {'bootstrap.servers': config.brokers}
+    producer = Producer(producer_conf)
+
+    while True:
+        try:
+            work = worker_queue.get()
+        except:
+            producer.flush()
+            return
+        producer.poll(0.0)
+        if work is None:
+            # None signals time to exit, put it back on the queue
+            # so the next worker will exit as well.
+            logger.debug('end (received "None" exit message)')
+            producer.flush()
+            worker_queue.put(None)
+            break
+        # process the message
+        logger.debug(f'start handling http POST')
+        try:
+            (path, headers, client_address_tuple, data) = work
+        except:
+            logger.error(f'unable to unpack "work" tuple')
+            continue
+        json_data = json.loads(data.decode('utf-8'))
+
+        metrics_dict = {}
+        metrics_avail = 0
+        metrics_dropped = 0
+        events_count = 0
+        for event in json_data['Events']:
+            if event_is(event, 'CrayTelemetry'):
+                # look through all sensors, and only keep the most
+                # recent values for each unique sensor
+                for key, sensor in get_sensors_CrayTelemetry(event):
+                    metrics_avail += 1
+                    if key not in metrics_dict:
+                        metrics_dict[key] = sensor
+                    elif metrics_dict[key]['timestamp'] < sensor['timestamp']:
+                        metrics_dict[key] = sensor
+                        metrics_dropped += 1
+                    else:
+                        metrics_dropped += 1
+            else:
+                handle_event_normal(event, producer, events_serializer, string_serializer, client_address_tuple)
+                events_count += 1
+        for metric in metrics_dict.values():
+            queue_sensor_CrayTelemetry(metric, producer, metrics_serializer, string_serializer)
+        producer.poll(0.0)
+
+        if events_count > 0:
+            logger.log(DEBUG2, f"events: {events_count}")
+        if metrics_avail > 0:
+            logger.log(DEBUG2, f"kept metrics: {metrics_avail-metrics_dropped}, dropped metrics: {metrics_dropped}({(metrics_dropped)/metrics_avail*100:.1f}%)")
+        logger.debug('end handling http POST')
+
+def subscriber_process(subscriber_queue, ip_address, port):
+    destination = ip_address+":"+str(port)
+    while True:
+        before = floor(time.time())
+        logger.debug('start (re)subscription procedure')
+        for host in config.hosts:
+            logger.log(DEBUG2, f'updating subscribtion for {host}')
+            update_subscriptions(host, destination=destination)
+        logger.debug('end (re)subscription procedure')
+        after = floor(time.time())
+        sleep_time = config.resubscribe_interval - (after - before)
+        if sleep_time < 1:
+            logger.warning(f'subscription updates are taking longer than resubscribe_interval of {config.resubscribe_interval}')
+            sleep_time = 0
+        try:
+            subscriber_queue.get(block=True, timeout=sleep_time)
+        except queue.Empty:
+            # The timeout is just used to wake this process up for the next round of
+            # subscription udpates.
+            pass
+        except KeyboardInterrupt:
+            return
+        else:
+            # Getting _any_ message means it is time to exit
+            return
+
+def parse_configuration():
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("-c", "--conf_file",
+                               help="configuration file",
+                               metavar="FILE")
+    args, argv = parent_parser.parse_known_args()
+
+    defaults = {}
+    file_argv = []
+    hosts = []
+    if args.conf_file:
+        cp = configparser.ConfigParser(allow_no_value=True)
+        cp.read(args.conf_file)
+        for key, value in cp.items("general"):
+            file_argv.append('--'+key)
+            file_argv.append(value)
+        argv = file_argv + argv
+
+        if hostname in cp:
+            defaults['hosts'] = list(cp[hostname].keys())
+        else:
+            defaults['hosts'] = []
+
+    parser = argparse.ArgumentParser(parents=[parent_parser])
+    parser.set_defaults(**defaults)
+    parser.add_argument("-b", "--brokers")
+    parser.add_argument("-s", "--schema_registry")
+    parser.add_argument("-u", "--redfish_username")
+    parser.add_argument("-p", "--redfish_password")
+    parser.add_argument("-A", "--address")
+    parser.add_argument("-P", "--port", type=int, default=8093)
+    parser.add_argument("-t", "--topic_prefix", default="timeseries-redfish-")
+    parser.add_argument("--resubscribe_interval", type=int, default=3600)
+    parser.add_argument("-w", "--worker_count", type=int, default=16)
+    parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
+
+    args = parser.parse_args(argv)
+
+    args_dict = vars(args)
+    missing = False
+    for required in "brokers", "schema_registry", "redfish_username", "redfish_password":
+        if required not in args_dict or args_dict[required] is None:
+            print(f'"{required}" must be supplied in the configuration file, or on the command line')
+            missing = True
+    if missing:
+        sys.exit(1)
+
+    # Lookup the ip_address of this node on the "switch" VLAN
+    if not args.address:
+        ip_address = subprocess.run(['getent', 'hosts', hostname+'-shasta'], stdout=subprocess.PIPE)
+        ip_address = ip_address.stdout.decode("utf-8").split()[0]
+        args.address = ip_address
+
+    return args
+
+def main():
+    global logger
+    global config
+
+    config = parse_configuration()
+    logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.verbosity])
+
+    worker_queue = multiprocessing.Queue()
+    workers = []
+    for _ in range(config.worker_count):
+        worker = multiprocessing.Process(target=worker_process, args=(worker_queue,))
+        worker.start()
+        workers.append(worker)
+
+    subscriber_queue = multiprocessing.Queue()
+    subscriber = multiprocessing.Process(target=subscriber_process,
+                                         args=(subscriber_queue, config.address, config.port))
+    subscriber.start()
+
+    run_http_server(worker_queue, config.address, port=config.port)
+
+    # Signal exit by putting "None" in the various queues
+    subscriber_queue.put(None)
+    subscriber_queue.close()
+    worker_queue.put(None)
+    worker_queue.close()
+    for process in workers:
+        process.join()
+    subscriber.join()
+
+if __name__ == '__main__':
+    main()
