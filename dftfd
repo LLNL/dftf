@@ -368,11 +368,9 @@ def event_is(event, message_id_prefix):
     else:
         return False
 
-def worker_process(worker_queue):
+def worker_process(worker_queue, kafka_conf, schema_registry_conf):
     logger.debug('start')
 
-    schema_registry_conf = {}
-    schema_registry_conf['url'] = config.schema_registry
     schema_registry_client = SchemaRegistryClient(schema_registry_conf)
     avro_serializer_conf = {}
     avro_serializer_conf['subject.name.strategy'] = record_subject_name_strategy
@@ -385,8 +383,7 @@ def worker_process(worker_queue):
                                        events_schema,
                                        to_dict=None,
                                        conf=avro_serializer_conf)
-    producer_conf = {'bootstrap.servers': config.brokers}
-    producer = Producer(producer_conf)
+    producer = Producer(kafka_conf)
 
     while True:
         try:
@@ -448,7 +445,10 @@ def subscriber_process(subscriber_queue, ip_address, port):
         logger.debug('start (re)subscription procedure')
         for host in config.hosts:
             logger.log(DEBUG2, f'updating subscribtion for {host}')
-            update_subscriptions(host, destination=destination)
+            try:
+                update_subscriptions(host, destination=destination)
+            except:
+                logger.warning(f'Failed to update subscription for "{host}"')
         logger.debug('end (re)subscription procedure')
         after = floor(time.time())
         sleep_time = config.resubscribe_interval - (after - before)
@@ -477,6 +477,8 @@ def parse_configuration():
     defaults = {}
     file_argv = []
     hosts = []
+    kafka_conf = {}
+    schema_registry_conf = {}
     if args.conf_file:
         cp = configparser.ConfigParser(allow_no_value=True)
         cp.read(args.conf_file)
@@ -485,6 +487,11 @@ def parse_configuration():
             file_argv.append(value)
         argv = file_argv + argv
 
+        if "kafka" in cp:
+            kafka_conf = dict(cp.items("kafka"))
+        if "schema_registry" in cp:
+            schema_registry_conf = dict(cp.items("schema_registry"))
+
         if hostname in cp:
             defaults['hosts'] = list(cp[hostname].keys())
         else:
@@ -492,8 +499,6 @@ def parse_configuration():
 
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.set_defaults(**defaults)
-    parser.add_argument("-b", "--brokers")
-    parser.add_argument("-s", "--schema_registry")
     parser.add_argument("-u", "--redfish_username")
     parser.add_argument("-p", "--redfish_password")
     parser.add_argument("-A", "--address")
@@ -507,7 +512,7 @@ def parse_configuration():
 
     args_dict = vars(args)
     missing = False
-    for required in "brokers", "schema_registry", "redfish_username", "redfish_password":
+    for required in "redfish_username", "redfish_password":
         if required not in args_dict or args_dict[required] is None:
             print(f'"{required}" must be supplied in the configuration file, or on the command line')
             missing = True
@@ -520,19 +525,22 @@ def parse_configuration():
         ip_address = ip_address.stdout.decode("utf-8").split()[0]
         args.address = ip_address
 
-    return args
+    return args, kafka_conf, schema_registry_conf
 
 def main():
     global logger
     global config
 
-    config = parse_configuration()
+    config, kafka_conf, schema_registry_conf = parse_configuration()
     logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.verbosity])
 
     worker_queue = multiprocessing.Queue()
     workers = []
     for _ in range(config.worker_count):
-        worker = multiprocessing.Process(target=worker_process, args=(worker_queue,))
+        worker = multiprocessing.Process(target=worker_process,
+                                         args=(worker_queue,
+                                               kafka_conf,
+                                               schema_registry_conf))
         worker.start()
         workers.append(worker)
 
