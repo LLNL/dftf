@@ -180,7 +180,7 @@ def update_subscriptions(host, destination):
     registries=["CrayTelemetry"]
     sub = find_subscription(session, subscriptions, destination,
                             client_context, event_types, registries)
-    if sub is None:
+    if sub is None and config.kafka:
         response = redfish_utilities.create_event_subscription(
             context=session,
             destination=destination,
@@ -324,19 +324,25 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         event['OriginOfCondition'] = ''
     else:
         event['OriginOfCondition'] = event['OriginOfCondition']['@odata.id']
-    logger.log(DEBUG3, f"{event['timestamp']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
-    topic = config.topic_prefix+"crayevents"
-    try:
-        producer.produce(topic=topic,
-                         key=string_serializer(hostname,
-                                               SerializationContext(topic, MessageField.KEY)),
-                         value=events_serializer(event,
-                                                 SerializationContext(topic, MessageField.VALUE)),
-                         on_delivery=delivery_report)
-    except KeyboardInterrupt:
-        pass
-    except ValueError:
-        logger.error("invalid input for kafka topic, discarding record")
+    if config.log_alerts:
+        level = logging.INFO
+    else:
+        level = DEBUG3
+    logger.log(level, f"{event['timestamp']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
+
+    if config.kafka:
+        topic = config.topic_prefix+"crayevents"
+        try:
+            producer.produce(topic=topic,
+                             key=string_serializer(hostname,
+                                                   SerializationContext(topic, MessageField.KEY)),
+                             value=events_serializer(event,
+                                                     SerializationContext(topic, MessageField.VALUE)),
+                             on_delivery=delivery_report)
+        except KeyboardInterrupt:
+            pass
+        except ValueError:
+            logger.error("invalid input for kafka topic, discarding record")
 
 def delivery_report(err, msg):
     """
@@ -371,32 +377,40 @@ def event_is(event, message_id_prefix):
 def worker_process(worker_queue, kafka_conf, schema_registry_conf):
     logger.debug('start')
 
-    schema_registry_client = SchemaRegistryClient(schema_registry_conf)
-    avro_serializer_conf = {}
-    avro_serializer_conf['subject.name.strategy'] = record_subject_name_strategy
-    metrics_serializer = AvroSerializer(schema_registry_client,
-                                        metrics_schema,
-                                        to_dict=None,
-                                        conf=avro_serializer_conf)
-    string_serializer = StringSerializer('utf_8')
-    events_serializer = AvroSerializer(schema_registry_client,
-                                       events_schema,
-                                       to_dict=None,
-                                       conf=avro_serializer_conf)
-    producer = Producer(kafka_conf)
+    producer = None
+    metrics_serializer = None
+    string_serializer = None
+    events_serializer = None
+    if config.kafka:
+        schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+        avro_serializer_conf = {}
+        avro_serializer_conf['subject.name.strategy'] = record_subject_name_strategy
+        metrics_serializer = AvroSerializer(schema_registry_client,
+                                            metrics_schema,
+                                            to_dict=None,
+                                            conf=avro_serializer_conf)
+        string_serializer = StringSerializer('utf_8')
+        events_serializer = AvroSerializer(schema_registry_client,
+                                           events_schema,
+                                           to_dict=None,
+                                           conf=avro_serializer_conf)
+        producer = Producer(kafka_conf)
 
     while True:
         try:
             work = worker_queue.get()
         except:
-            producer.flush()
+            if config.kafka:
+                producer.flush()
             return
-        producer.poll(0.0)
+        if config.kafka:
+            producer.poll(0.0)
         if work is None:
             # None signals time to exit, put it back on the queue
             # so the next worker will exit as well.
             logger.debug('end (received "None" exit message)')
-            producer.flush()
+            if config.kafka:
+                producer.flush()
             worker_queue.put(None)
             break
         # process the message
@@ -429,8 +443,10 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                 handle_event_normal(event, producer, events_serializer, string_serializer, client_address_tuple)
                 events_count += 1
         for metric in metrics_dict.values():
-            queue_sensor_CrayTelemetry(metric, producer, metrics_serializer, string_serializer)
-        producer.poll(0.0)
+            if config.kafka:
+                queue_sensor_CrayTelemetry(metric, producer, metrics_serializer, string_serializer)
+        if config.kafka:
+            producer.poll(0.0)
 
         if events_count > 0:
             logger.log(DEBUG2, f"events: {events_count}")
@@ -484,7 +500,8 @@ def parse_configuration():
         cp.read(args.conf_file)
         for key, value in cp.items("general"):
             file_argv.append('--'+key)
-            file_argv.append(value)
+            if value:
+                file_argv.append(value)
         argv = file_argv + argv
 
         if "kafka" in cp:
@@ -507,15 +524,18 @@ def parse_configuration():
     parser.add_argument("--resubscribe_interval", type=int, default=3600)
     parser.add_argument("-w", "--worker_count", type=int, default=16)
     parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
+    parser.add_argument("--log_alerts", action='store_true', default=False)
+    parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
 
     args = parser.parse_args(argv)
 
     args_dict = vars(args)
     missing = False
-    for required in "redfish_username", "redfish_password":
-        if required not in args_dict or args_dict[required] is None:
-            print(f'"{required}" must be supplied in the configuration file, or on the command line')
-            missing = True
+    if args.kafka:
+        for required in "redfish_username", "redfish_password":
+            if required not in args_dict or args_dict[required] is None:
+                print(f'"{required}" must be supplied in the configuration file, or on the command line')
+                missing = True
     if missing:
         sys.exit(1)
 
