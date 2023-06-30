@@ -134,6 +134,21 @@ events_schema = """{
     ]
 }
 """
+
+def getent_hosts(hostname_or_ip, return_field_number):
+    if hostname_or_ip not in getent_hosts.cache:
+        try:
+            hosts = subprocess.run(['getent', 'hosts', hostname_or_ip], stdout=subprocess.PIPE)
+            hosts = hosts.stdout.decode("utf-8").split()
+            getent_hosts.cache[hostname_or_ip] = hosts
+        except:
+            pass
+    if hostname_or_ip in getent_hosts.cache:
+        return getent_hosts.cache[hostname_or_ip][return_field_number]
+    else:
+        return hostname_or_ip
+getent_hosts.cache = {}
+
 def find_subscription(session,
                       subscriptions,
                       destination,
@@ -313,7 +328,9 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         return
     ts_millis = round(ts.timestamp()*1000)
     event['timestamp'] = ts_millis
-    event['Location'] = client_address_tuple[0]  # the IP address as a string
+    # client_address_tuple[0] is the IP address as a string
+    client_hostname = getent_hosts(client_address_tuple[0], 1)
+    event['Location'] = client_hostname
     if 'Message' not in event:
         event['Message'] = ''
     if 'MessageId' not in event:
@@ -325,10 +342,9 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
     else:
         event['OriginOfCondition'] = event['OriginOfCondition']['@odata.id']
     if config.log_alerts:
-        level = logging.INFO
+        logger.log(logging.INFO, f"{timestamp} {event['Location']} {event['MessageId']} {event['Severity']} \"{event['Message']}\" {event['OriginOfCondition']}")
     else:
-        level = DEBUG3
-    logger.log(level, f"{event['timestamp']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
+        logger.log(DEBUG3, f"{event['timestamp']} {event['Location']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
 
     if config.kafka:
         topic = config.topic_prefix+"crayevents"
@@ -541,9 +557,7 @@ def parse_configuration():
 
     # Lookup the ip_address of this node on the "switch" VLAN
     if not args.address:
-        ip_address = subprocess.run(['getent', 'hosts', hostname+'-shasta'], stdout=subprocess.PIPE)
-        ip_address = ip_address.stdout.decode("utf-8").split()[0]
-        args.address = ip_address
+        args.address = getent_hosts(hostname+'-shasta', 0)
 
     return args, kafka_conf, schema_registry_conf
 
