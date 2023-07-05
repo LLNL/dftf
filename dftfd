@@ -48,6 +48,7 @@ verbosity_levels = {
 config = None
 logger = None
 hostname = platform.node()
+log_alerts_file = None
 
 metrics_schema = """{
     "name": "RedfishCrayOemSensors",
@@ -341,6 +342,9 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         event['OriginOfCondition'] = ''
     else:
         event['OriginOfCondition'] = event['OriginOfCondition']['@odata.id']
+    if log_alerts_file:
+        log_alerts_file.write(f"{timestamp} {event['Location']} {event['MessageId']} {event['Severity']} \"{event['Message']}\" {event['OriginOfCondition']}\n")
+        log_alerts_file.flush()
     if config.log_alerts:
         logger.log(logging.INFO, f"{timestamp} {event['Location']} {event['MessageId']} {event['Severity']} \"{event['Message']}\" {event['OriginOfCondition']}")
     else:
@@ -541,6 +545,7 @@ def parse_configuration():
     parser.add_argument("-w", "--worker_count", type=int, default=16)
     parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
     parser.add_argument("--log_alerts", action='store_true', default=False)
+    parser.add_argument("--log_alerts_file", type=str)
     parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
 
     args = parser.parse_args(argv)
@@ -558,6 +563,14 @@ def parse_configuration():
     # Lookup the ip_address of this node on the "switch" VLAN
     if not args.address:
         args.address = getent_hosts(hostname+'-shasta', 0)
+
+    if args.log_alerts_file:
+        global log_alerts_file
+        try:
+            log_alerts_file = open(args.log_alerts_file, "a")
+        except:
+            print(f'Unable to open file "{args.log_alerts_file}"')
+            raise
 
     return args, kafka_conf, schema_registry_conf
 
