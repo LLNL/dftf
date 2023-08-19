@@ -48,6 +48,7 @@ verbosity_levels = {
 config = None
 logger = None
 hostname = platform.node()
+client_last_accepted = {}
 
 metrics_schema = """{
     "name": "RedfishCrayOemSensors",
@@ -205,7 +206,6 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def __init__(self, worker_queue, sample_period, *args, **kwargs):
         self.worker_queue = worker_queue
         self.sample_period = sample_period
-        self.client_last_accepted = {}
         super().__init__(*args, **kwargs)
     def log_request(self, code='-', size='-'):
         # silence internal library messages for each request
@@ -216,19 +216,21 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.send_response_only(405)
 
     def do_POST(self):
+        global client_last_accepted
+
         ts = time.time()
         client_ip = self.client_address[0]
-        if client_ip not in self.client_last_accepted:
-            self.client_last_accepted[client_ip] = 0
+        if client_ip not in client_last_accepted:
+            client_last_accepted[client_ip] = 0
 
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
 
-        delta = ts - self.client_last_accepted[client_ip]
+        delta = ts - client_last_accepted[client_ip]
         if delta >= self.sample_period:
             logger.debug(f'{self} queueing POSTed content from {client_ip}, content length = {content_length}')
             self.worker_queue.put((self.path, self.headers, client_ip, post_data))
-            self.client_last_accepted[client_ip] = ts
+            client_last_accepted[client_ip] = ts
         else:
             logger.debug(f'{self} skipping POSTed content from {client_ip}, content length = {content_length}')
 
