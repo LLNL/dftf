@@ -218,10 +218,11 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def do_POST(self):
         global client_last_accepted
 
+        ts = time.time()
         client_ip = self.client_address[0]
         if client_ip not in client_last_accepted:
             client_last_accepted[client_ip] = 0
-        delta = time.time() - client_last_accepted[client_ip]
+        delta = ts - client_last_accepted[client_ip]
 
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
