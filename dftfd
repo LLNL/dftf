@@ -49,6 +49,7 @@ config = None
 logger = None
 hostname = platform.node()
 log_alerts_file = None
+client_last_accepted = {}
 
 metrics_schema = """{
     "name": "RedfishCrayOemSensors",
@@ -218,8 +219,9 @@ def update_subscriptions(host, destination):
     session.logout()
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
-    def __init__(self, worker_queue, *args, **kwargs):
+    def __init__(self, worker_queue, sample_period, *args, **kwargs):
         self.worker_queue = worker_queue
+        self.sample_period = sample_period
         super().__init__(*args, **kwargs)
     def log_request(self, code='-', size='-'):
         # silence internal library messages for each request
@@ -230,10 +232,24 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.send_response_only(405)
 
     def do_POST(self):
+        global client_last_accepted
+
+        ts = time.time()
+        client_ip = self.client_address[0]
+        if client_ip not in client_last_accepted:
+            client_last_accepted[client_ip] = 0
+        delta = ts - client_last_accepted[client_ip]
+
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
-        logger.debug(f'queueing POSTed content, content length = {content_length}')
-        self.worker_queue.put((self.path, self.headers, self.client_address, post_data))
+
+        if delta >= self.sample_period:
+            logger.debug(f'queueing POSTed content from {client_ip}, delta {delta:.2f}s, content length = {content_length}')
+            self.worker_queue.put((self.path, self.headers, client_ip, post_data))
+            client_last_accepted[client_ip] = ts
+        else:
+            logger.debug(f'skipping POSTed content from {client_ip}, delta {delta:.2f}s, content length = {content_length}')
+
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
@@ -241,7 +257,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
 
 def run_http_server(worker_queue, ip_address, port):
     server_address = (ip_address, int(port))
-    handler = functools.partial(Handle_HTTP_Connection, worker_queue)
+    handler = functools.partial(Handle_HTTP_Connection, worker_queue, config.sample_period)
     httpd = ThreadingHTTPServer(server_address, handler)
     logger.debug(f'Starting http server on port {port}')
     try:
@@ -547,6 +563,7 @@ def parse_configuration():
     parser.add_argument("--log_alerts", action='store_true', default=False)
     parser.add_argument("--log_alerts_file", type=str)
     parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
+    parser.add_argument("--sample_period", type=int, default=0)
 
     args = parser.parse_args(argv)
 
