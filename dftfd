@@ -218,21 +218,20 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def do_POST(self):
         global client_last_accepted
 
-        ts = time.time()
         client_ip = self.client_address[0]
         if client_ip not in client_last_accepted:
             client_last_accepted[client_ip] = 0
+        delta = time.time() - client_last_accepted[client_ip]
 
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
 
-        delta = ts - client_last_accepted[client_ip]
         if delta >= self.sample_period:
-            logger.debug(f'queueing POSTed content from {client_ip}, last delta {delta}, content length = {content_length}')
+            logger.debug(f'queueing POSTed content from {client_ip}, delta {delta:.2}s, content length = {content_length}')
             self.worker_queue.put((self.path, self.headers, client_ip, post_data))
             client_last_accepted[client_ip] = ts
         else:
-            logger.debug(f'skipping POSTed content from {client_ip}, last delta {delta}, content length = {content_length}')
+            logger.debug(f'skipping POSTed content from {client_ip}, delta {delta:.2}s, content length = {content_length}')
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
