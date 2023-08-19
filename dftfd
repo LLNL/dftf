@@ -202,8 +202,10 @@ def update_subscriptions(host, destination):
     session.logout()
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
-    def __init__(self, worker_queue, *args, **kwargs):
+    def __init__(self, worker_queue, sample_period, *args, **kwargs):
         self.worker_queue = worker_queue
+        self.sample_period = sample_period
+        self.client_last_accepted = {}
         super().__init__(*args, **kwargs)
     def log_request(self, code='-', size='-'):
         # silence internal library messages for each request
@@ -214,10 +216,21 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.send_response_only(405)
 
     def do_POST(self):
+        ts = time.time()
+        if self.client_address not in self.client_last_accepted:
+            self.client_last_accepted[self.client_address] = 0
+
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
-        logger.debug(f'queueing POSTed content, content length = {content_length}')
-        self.worker_queue.put((self.path, self.headers, self.client_address, post_data))
+
+        delta = ts - self.client_last_accepted[self.client_address]
+        if delta >= self.sample_period:
+            logger.debug(f'queueing POSTed content from {self.client_address}, content length = {content_length}')
+            self.worker_queue.put((self.path, self.headers, self.client_address, post_data))
+            self.client_last_accepted[self.client_address] = ts
+        else:
+            logger.debug(f'skipping POSTed content from {self.client_address}, content length = {content_length}')
+
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
@@ -225,7 +238,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
 
 def run_http_server(worker_queue, ip_address, port):
     server_address = (ip_address, int(port))
-    handler = functools.partial(Handle_HTTP_Connection, worker_queue)
+    handler = functools.partial(Handle_HTTP_Connection, worker_queue, config.sample_period)
     httpd = ThreadingHTTPServer(server_address, handler)
     logger.debug(f'Starting http server on port {port}')
     try:
@@ -507,6 +520,7 @@ def parse_configuration():
     parser.add_argument("--resubscribe_interval", type=int, default=3600)
     parser.add_argument("-w", "--worker_count", type=int, default=16)
     parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
+    parser.add_argument("--sample_period", type=int, default=0)
 
     args = parser.parse_args(argv)
 
