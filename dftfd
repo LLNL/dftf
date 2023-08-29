@@ -146,10 +146,12 @@ def getent_hosts(hostname_or_ip, return_field_number):
         except:
             pass
     if hostname_or_ip in getent_hosts.cache:
-        logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {getent_hosts.cache[hostname_or_ip][return_field_number]}")
+        if logger:
+            logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {getent_hosts.cache[hostname_or_ip][return_field_number]}")
         return getent_hosts.cache[hostname_or_ip][return_field_number]
     else:
-        logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
+        if logger:
+            logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
         return hostname_or_ip
 getent_hosts.cache = {}
 
