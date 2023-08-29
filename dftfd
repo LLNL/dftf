@@ -268,7 +268,7 @@ def run_http_server(worker_queue, ip_address, port):
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
-    logger.debug('Stopping http server')
+    logger.warning('Stopping http server')
     httpd.server_close()
 
 def removeprefix(string_val, prefix):
@@ -458,9 +458,18 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         try:
             (path, headers, client_address_tuple, data) = work
         except:
-            logger.error(f'unable to unpack "work" tuple')
+            logger.error(f'Unable to unpack "work" tuple')
             continue
-        json_data = json.loads(data.decode('utf-8'))
+        try:
+            data_decoded = data.decode('utf-8')
+        except:
+            logger.error(f'Unable to decode("utf-8") the data from {client_address_tuple}')
+            continue
+        try:
+            json_data = json.loads(data_decoded)
+        except:
+            logger.error(f'Failed JSON decode of data from {client_address_tuple}, data starts with: "{data_decoded[:40]}"')
+            continue
 
         metrics_dict = {}
         metrics_avail = 0
