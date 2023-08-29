@@ -145,14 +145,21 @@ def getent_hosts(hostname_or_ip, return_field_number):
             getent_hosts.cache[hostname_or_ip] = hosts
         except:
             pass
+    name = None
     if hostname_or_ip in getent_hosts.cache:
         if logger:
             logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {getent_hosts.cache[hostname_or_ip][return_field_number]}")
-        return getent_hosts.cache[hostname_or_ip][return_field_number]
+        name = getent_hosts.cache[hostname_or_ip][return_field_number]
     else:
         if logger:
             logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
-        return hostname_or_ip
+        name = hostname_or_ip
+
+    if logger and name == '1':
+        logger.warning(f"getent_hosts({hostname_or_ip}, {return_field_number}) = name, cache entry = {getent_hosts.cache[hostname_or_ip]}")
+    return name
+
+
 getent_hosts.cache = {}
 
 def find_subscription(session,
