@@ -159,10 +159,10 @@ def get_name(hostname_or_ip):
             pass
     name = None
     if hostname_or_ip in get_name.cache:
-        logger.log(DEBUG2, f"get_name({hostname_or_ip}, {return_field_number}) returning {get_name.cache[hostname_or_ip][return_field_number]}")
-        name = get_name.cache[hostname_or_ip][return_field_number]
+        logger.log(DEBUG2, f"get_name({hostname_or_ip}) returning {get_name.cache[hostname_or_ip]}")
+        name = get_name.cache[hostname_or_ip]
     else:
-        logger.log(DEBUG2, f"get_name({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
+        logger.log(DEBUG2, f"get_name({hostname_or_ip}) returning {hostname_or_ip} (NOT in cache)")
         name = hostname_or_ip
 
     return name
