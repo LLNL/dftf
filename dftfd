@@ -137,28 +137,48 @@ events_schema = """{
 }
 """
 
-def getent_hosts(hostname_or_ip, return_field_number):
-    if hostname_or_ip not in getent_hosts.cache:
+def get_name(hostname_or_ip):
+    if hostname_or_ip not in get_name.cache:
         try:
             hosts = subprocess.run(['getent', 'hosts', hostname_or_ip], stdout=subprocess.PIPE)
             hosts = hosts.stdout.decode("utf-8").split()
-            getent_hosts.cache[hostname_or_ip] = hosts
+            # Index 0 is the IP address, 1+ are hostnames. We prefer a Cray "x" prefixed
+            # name, but use index 1 if an x name is not found.
+            name = None
+            if len(hosts > 1):
+                for n in hosts[1:]:
+                    if n[0] == "x":
+                        name = n[0]
+                        break
+                if name is None:
+                    name = hosts[1]
+            else:
+                name = hostname_or_ip
+            get_name.cache[hostname_or_ip] = name
         except:
             pass
     name = None
-    if hostname_or_ip in getent_hosts.cache:
-        if logger:
-            logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {getent_hosts.cache[hostname_or_ip][return_field_number]}")
-        name = getent_hosts.cache[hostname_or_ip][return_field_number]
+    if hostname_or_ip in get_name.cache:
+        logger.log(DEBUG2, f"get_name({hostname_or_ip}, {return_field_number}) returning {get_name.cache[hostname_or_ip][return_field_number]}")
+        name = get_name.cache[hostname_or_ip][return_field_number]
     else:
-        if logger:
-            logger.log(DEBUG2, f"getent_hosts({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
+        logger.log(DEBUG2, f"get_name({hostname_or_ip}, {return_field_number}) returning {hostname_or_ip} (NOT in cache)")
         name = hostname_or_ip
 
-    if logger and name == '1':
-        logger.warning(f"getent_hosts({hostname_or_ip}, {return_field_number}) = name, cache entry = {getent_hosts.cache[hostname_or_ip]}")
     return name
-getent_hosts.cache = {}
+get_name.cache = {}
+
+def getent_hosts(hostname_or_ip, return_field_number):
+    hosts = []
+    try:
+        hosts = subprocess.run(['getent', 'hosts', hostname_or_ip], stdout=subprocess.PIPE)
+        hosts = hosts.stdout.decode("utf-8").split()
+    except:
+        pass
+    if len(hosts) < return_field_number+1:
+        return hostname_or_ip
+
+    return hosts[return_field_number]
 
 def find_subscription(session,
                       subscriptions,
@@ -355,7 +375,7 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
     ts_millis = round(ts.timestamp()*1000)
     event['timestamp'] = ts_millis
     # client_ip is the IP address as a string
-    client_hostname = getent_hosts(client_ip, 1)
+    client_hostname = get_name(client_ip)
     event['Location'] = client_hostname
     if 'Message' not in event:
         event['Message'] = ''
