@@ -158,8 +158,6 @@ def getent_hosts(hostname_or_ip, return_field_number):
     if logger and name == '1':
         logger.warning(f"getent_hosts({hostname_or_ip}, {return_field_number}) = name, cache entry = {getent_hosts.cache[hostname_or_ip]}")
     return name
-
-
 getent_hosts.cache = {}
 
 def find_subscription(session,
@@ -343,7 +341,7 @@ def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_seri
     except ValueError:
         logger.error("invalid input for kafka topic, discarding record")
 
-def handle_event_normal(event, producer, events_serializer, string_serializer, client_address_tuple):
+def handle_event_normal(event, producer, events_serializer, string_serializer, client_ip):
     try:
         timestamp = event['EventTimestamp']
     except:
@@ -356,8 +354,8 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         return
     ts_millis = round(ts.timestamp()*1000)
     event['timestamp'] = ts_millis
-    # client_address_tuple[0] is the IP address as a string
-    client_hostname = getent_hosts(client_address_tuple[0], 1)
+    # client_ip is the IP address as a string
+    client_hostname = getent_hosts(client_ip, 1)
     event['Location'] = client_hostname
     if 'Message' not in event:
         event['Message'] = ''
@@ -463,19 +461,19 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         # process the message
         logger.debug(f'start handling http POST')
         try:
-            (path, headers, client_address_tuple, data) = work
+            (path, headers, client_ip, data) = work
         except:
             logger.error(f'Unable to unpack "work" tuple')
             continue
         try:
             data_decoded = data.decode('utf-8')
         except:
-            logger.error(f'Unable to decode("utf-8") the data from {client_address_tuple}')
+            logger.error(f'Unable to decode("utf-8") the data from {client_ip}')
             continue
         try:
             json_data = json.loads(data_decoded)
         except:
-            logger.error(f'Failed JSON decode of data from {client_address_tuple}, data starts with: "{data_decoded[:40]}"')
+            logger.error(f'Failed JSON decode of data from {client_ip}, data starts with: "{data_decoded[:40]}"')
             continue
 
         metrics_dict = {}
@@ -496,7 +494,7 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                     else:
                         metrics_dropped += 1
             else:
-                handle_event_normal(event, producer, events_serializer, string_serializer, client_address_tuple)
+                handle_event_normal(event, producer, events_serializer, string_serializer, client_ip)
                 events_count += 1
         for metric in metrics_dict.values():
             if config.kafka:
