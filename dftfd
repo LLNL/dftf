@@ -135,7 +135,8 @@ events_schema = """{
         },
         {
             "name": "syslog_level",
-            "type": "string"
+            "type": "string",
+            "default": ""
         }
     ]
 }
