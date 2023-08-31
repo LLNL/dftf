@@ -132,7 +132,11 @@ events_schema = """{
         {
             "name": "OriginOfCondition",
             "type": "string"
-        }
+        },
+        {
+            "name": "syslog_level",
+            "type": "string"
+        },
     ]
 }
 """
@@ -361,6 +365,12 @@ def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_seri
     except ValueError:
         logger.error("invalid input for kafka topic, discarding record")
 
+
+redfish_to_syslog_severity = {
+    "OK": "information",
+    "Warning": "warning",
+    "Critical": "error"
+}
 def handle_event_normal(event, producer, events_serializer, string_serializer, client_ip):
     try:
         timestamp = event['EventTimestamp']
@@ -383,6 +393,11 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         event['MessageId'] = ''
     if 'Severity' not in event:
         event['Severity'] = ''
+        event['syslog_level'] = 'unknown'
+    else if event['Severity'] in redfish_to_syslog_severity:
+        event['syslog_level'] = redfish_to_syslog_severity[event['Severity']]
+    else:
+        event['syslog_level'] = 'unknown'
     if 'OriginOfCondition' not in event or '@odata.id' not in event['OriginOfCondition']:
         event['OriginOfCondition'] = ''
     else:
