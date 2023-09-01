@@ -30,6 +30,8 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.schema_registry import record_subject_name_strategy
 
+CLOCK_SKEW_LIMIT_SEC=300
+
 DEBUG2=logging.DEBUG-1
 DEBUG3=logging.DEBUG-2
 logging.addLevelName(DEBUG2, 'DEBUG2')
@@ -312,25 +314,17 @@ def get_sensors_CrayTelemetry(event):
     eventname = removeprefix(event['MessageId'], 'CrayTelemetry.')
     sensor_ignored_count = 0
     for sensor in event['Oem']['Sensors']:
-        try:
-            timestamp = sensor['Timestamp']
-        except:
-            logger.warning('sensor is missing Timestamp')
-            sensor_ignored_count += 1
-            continue
-        try:
-            ts = dateutil.parser.parse(timestamp)
-        except:
-            logger.warning(f"unable to parse Timestamp {timestamp}")
-            continue
-        ts_millis = round(ts.timestamp()*1000)
-        sensor['timestamp'] = ts_millis
         if 'Location' not in sensor:
             logger.warning('sensor is missing Location')
             sensor_ignored_count += 1
             continue
+        if 'Timestamp' not in sensor:
+            logger.warning('sensor from {sensor["Location"]}is missing Timestamp')
+            sensor_ignored_count += 1
+            continue
+        sensor['timestamp'] = parse_timestamp(sensor['Timestamp'], sensor['Location'])
         if 'Value' not in sensor:
-            logger.warning('sensor is missing Value')
+            logger.warning('sensor from {sensor["Location"]} is missing Value')
             sensor_ignored_count += 1
             continue
         sensor['EventName'] = eventname
@@ -366,6 +360,20 @@ def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_seri
     except ValueError:
         logger.error("invalid input for kafka topic, discarding record")
 
+# returns integers milliseconds-since-epoch
+def parse_timestamp(timestamp_string, location):
+    now = round(time.time() * 1000)
+    try:
+        ts_datetime = dateutil.parser.parse(timestamp_string)
+    except:
+        logger.warning(f"Unable to parse EventTimestamp {timestamp_string} from {location}")
+        return now
+    ts = round(ts_datetime.timestamp() * 1000)
+    skew = abs(now - ts)
+    if skew > (CLOCK_SKEW_LIMIT_SEC*1000):
+        logger.warning('Eexcessive clock skew from {location}: {skew//1000}s')
+        ts = now
+    return ts
 
 redfish_to_syslog_severity = {
     "OK": "information",
@@ -373,20 +381,12 @@ redfish_to_syslog_severity = {
     "Critical": "error"
 }
 def handle_event_normal(event, producer, events_serializer, string_serializer, client_ip):
-    try:
-        timestamp = event['EventTimestamp']
-    except:
-        logger.warning('event is missing EventTimestamp')
-        return
-    try:
-        ts = dateutil.parser.parse(timestamp)
-    except:
-        logger.warning(f"unable to parse EventTimestamp {timestamp}")
-        return
-    ts_millis = round(ts.timestamp()*1000)
-    event['timestamp'] = ts_millis
     # client_ip is the IP address as a string
     client_hostname = get_name(client_ip)
+    if 'EventTimestamp' not in event:
+        logger.warning('event from {client_hostname} is missing EventTimestamp')
+        return
+    event['timestamp'] = parse_timestamp(event['EventTimestamp'], client_hostname)
     event['Location'] = client_hostname
     if 'Message' not in event:
         event['Message'] = ''
