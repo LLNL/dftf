@@ -361,6 +361,7 @@ def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_seri
         logger.error("invalid input for kafka topic, discarding record")
 
 # returns integers milliseconds-since-epoch
+WARNING_LIMIT_MS = 24*60*60*1000
 def parse_timestamp(timestamp_string, location):
     now = round(time.time() * 1000)
     try:
@@ -371,9 +372,13 @@ def parse_timestamp(timestamp_string, location):
     ts = round(ts_datetime.timestamp() * 1000)
     skew = abs(now - ts)
     if skew > (CLOCK_SKEW_LIMIT_SEC*1000):
-        logger.warning('Eexcessive clock skew from {location}: {skew//1000}s')
+        if location not in parse_timestamp.last_warning \
+           or ((now - parse_timestamp.last_warning[location]) > WARNING_LIMIT_MS):
+            logger.warning('Excessive clock skew from {location}: {skew//1000}s')
+        parse_timestamp.last_warning[location] = now
         ts = now
     return ts
+parse_timestamp.last_warning = {}
 
 redfish_to_syslog_severity = {
     "OK": "information",
