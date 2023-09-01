@@ -264,7 +264,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         return
 
     def do_GET(self):
-        logger.warning("Invalid GET request,\nPath: %s\nHeaders:\n%s\n", str(self.path), str(self.headers))
+        logger.warning(f'Invalid GET request, Path: {str(self.path)}, Headers:{str(self.headers)}')
         self.send_response_only(405)
 
     def do_POST(self):
@@ -319,12 +319,12 @@ def get_sensors_CrayTelemetry(event):
             sensor_ignored_count += 1
             continue
         if 'Timestamp' not in sensor:
-            logger.warning('sensor from {sensor["Location"]}is missing Timestamp')
+            logger.warning(f'sensor from {sensor["Location"]} is missing Timestamp')
             sensor_ignored_count += 1
             continue
         sensor['timestamp'] = parse_timestamp(sensor['Timestamp'], sensor['Location'])
         if 'Value' not in sensor:
-            logger.warning('sensor from {sensor["Location"]} is missing Value')
+            logger.warning(f'sensor from {sensor["Location"]} is missing Value')
             sensor_ignored_count += 1
             continue
         sensor['EventName'] = eventname
@@ -374,7 +374,7 @@ def parse_timestamp(timestamp_string, location):
     if skew > (CLOCK_SKEW_LIMIT_SEC*1000):
         if location not in parse_timestamp.last_warning \
            or ((now - parse_timestamp.last_warning[location]) > WARNING_LIMIT_MS):
-            logger.warning('Excessive clock skew from {location}: {skew//1000}s')
+            logger.warning(f'Excessive clock skew from {location}: {skew//1000}s')
         parse_timestamp.last_warning[location] = now
         ts = now
     return ts
@@ -389,7 +389,7 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
     # client_ip is the IP address as a string
     client_hostname = get_name(client_ip)
     if 'EventTimestamp' not in event:
-        logger.warning('event from {client_hostname} is missing EventTimestamp')
+        logger.warning(f'event from {client_hostname} is missing EventTimestamp')
         return
     event['timestamp'] = parse_timestamp(event['EventTimestamp'], client_hostname)
     event['Location'] = client_hostname
