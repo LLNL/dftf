@@ -50,6 +50,7 @@ verbosity_levels = {
 config = None
 logger = None
 hostname = platform.node()
+cluster_name = hostname.rstrip('0123456789')
 log_alerts_file = None
 client_last_accepted = {}
 
@@ -104,6 +105,11 @@ metrics_schema = """{
             "name": "SensorName",
             "type": "string",
             "default": ""
+        },
+        {
+            "name": "Cluster",
+            "type": "string",
+            "default": ""
         }
     ]
 }
@@ -142,6 +148,11 @@ events_schema = """{
         },
         {
             "name": "syslog_level",
+            "type": "string",
+            "default": ""
+        },
+        {
+            "name": "Cluster",
             "type": "string",
             "default": ""
         }
@@ -373,6 +384,7 @@ def get_sensors_CrayTelemetry(event):
 
         sensor_name = ''.join(name)
         sensor['SensorName'] = sensor_name
+        sensor['Cluster'] = cluster_name
 
         logger.log(DEBUG3, f"{sensor['timestamp']} {sensor['Location']:10} {sensor['SensorName']:45} {sensor['Value']:10}")
 
@@ -425,6 +437,7 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         return
     event['timestamp'] = parse_timestamp(event['EventTimestamp'], client_hostname)
     event['Location'] = client_hostname
+    event['Cluster'] = cluster_name
     if 'Message' not in event:
         event['Message'] = ''
     if 'MessageId' not in event:
