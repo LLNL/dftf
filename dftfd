@@ -99,6 +99,11 @@ metrics_schema = """{
         {
             "name": "Value",
             "type": "double"
+        },
+        {
+            "name": "SensorName",
+            "type": "string",
+            "default": ""
         }
     ]
 }
@@ -327,24 +332,51 @@ def get_sensors_CrayTelemetry(event):
             logger.warning(f'sensor from {sensor["Location"]} is missing Value')
             sensor_ignored_count += 1
             continue
-        sensor['EventName'] = eventname
-        if 'PhysicalContext' not in sensor:
-            sensor['PhysicalContext'] = ''
-        if 'PhysicalSubContext' not in sensor:
-            sensor['PhysicalSubContext'] = ''
-        if 'DeviceSpecificContext' not in sensor:
-            sensor['DeviceSpecificContext'] = ''
-        if 'ParentalContext' not in sensor:
-            sensor['ParentalContext'] = ''
-        if 'Index' not in sensor:
-            sensor['Index'] = -1
-        if 'ParentalIndex' not in sensor:
-            sensor['ParentalIndex'] = -1
-        logger.log(DEBUG3, f"{sensor['timestamp']} {sensor['Location']:10} {sensor['Index']:4} {sensor['ParentalContext']:20} {sensor['ParentalIndex']:4} {sensor['PhysicalContext']:18} {sensor['PhysicalSubContext']:8} {sensor['DeviceSpecificContext']:18} {sensor['EventName']:15} {sensor['Value']:10}")
-        #logger.debug(f"event sensor count: {sensor_count} (ignored: {sensor_ignored_count})")
 
-        key = (sensor['EventName'], sensor['PhysicalContext'], sensor['PhysicalSubContext'], sensor['DeviceSpecificContext'], sensor['ParentalContext'], sensor['Index'], sensor['ParentalIndex'])
-        yield (key, sensor)
+        # The order in which we check the individual fields and append them to
+        # "name" is important. We are trying to make it match the order found
+        # in the Sensors string of the Redfish endpoint. While we don't work
+        # with the endpoints here, keeping the names the same will help humans
+        # tie the CrayTelemetry events to their associated Redfish enpoints.
+        # The sensor URI looks like:
+        #   ${hostname}/redfish/v1/Chassis/${ChassisId}/Sensors/${SensorId}
+        # and the SensorId format is:
+        #   [ParentalContext][ParentalIndex][PhysicalContext][Index][DeviceSpecificContext][PhysicalSubContext][ReadingType]
+        # where "ReadingType" is the EventName derived from the MessageId.
+        name = []
+        try:
+            name.append(sensor['ParentalContext'])
+        except KeyError:
+            sensor['ParentalContext'] = ''
+        try:
+            name.append(sensor['ParentalIndex'])
+        except KeyError:
+            sensor['ParentalIndex'] = -1
+        try:
+            name.append(sensor['PhysicalContext'])
+        except KeyError:
+            sensor['PhysicalContext'] = ''
+        try:
+            name.append(sensor['Index'])
+        except KeyError:
+            sensor['Index'] = -1
+        try:
+            name.append(sensor['DeviceSpecificContext'])
+        except KeyError:
+            sensor['DeviceSpecificContext'] = ''
+        try:
+            name.append(sensor['PhysicalSubContext'])
+        except KeyError:
+            sensor['PhysicalSubContext'] = ''
+        sensor['EventName'] = eventname
+        name.append(sensor['EventName'])
+
+        sensor_name = ''.join(name)
+        sensor['SensorName'] = sensor_name
+
+        logger.log(DEBUG3, f"{sensor['timestamp']} {sensor['Location']:10} {sensor['SensorName']:45} {sensor['Value']:10}")
+
+        yield (sensor_name, sensor)
 
 def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_serializer):
     topic = config.topic_prefix+"craytelemetry"
@@ -525,12 +557,12 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             if event_is(event, 'CrayTelemetry'):
                 # look through all sensors, and only keep the most
                 # recent values for each unique sensor
-                for key, sensor in get_sensors_CrayTelemetry(event):
+                for sensor_name, sensor in get_sensors_CrayTelemetry(event):
                     metrics_avail += 1
-                    if key not in metrics_dict:
-                        metrics_dict[key] = sensor
-                    elif metrics_dict[key]['timestamp'] < sensor['timestamp']:
-                        metrics_dict[key] = sensor
+                    if sensor_name not in metrics_dict:
+                        metrics_dict[sensor_name] = sensor
+                    elif metrics_dict[sensor_name]['timestamp'] < sensor['timestamp']:
+                        metrics_dict[sensor_name] = sensor
                         metrics_dropped += 1
                     else:
                         metrics_dropped += 1
