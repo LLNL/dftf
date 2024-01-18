@@ -107,9 +107,16 @@ metrics_schema = """{
             "default": ""
         },
         {
-            "name": "host.cluster",
-            "type": "string",
-            "default": ""
+            "name": "hostRecord",
+            "namespace": "host",
+            "type": "record",
+            "fields": [
+                {
+                    "name": "cluster",
+                    "type": "string",
+                    "default": ""
+                }
+            ]
         }
     ]
 }
@@ -152,9 +159,16 @@ events_schema = """{
             "default": ""
         },
         {
-            "name": "host.cluster",
-            "type": "string",
-            "default": ""
+            "name": "hostRecord",
+            "namespace": "host",
+            "type": "record",
+            "fields": [
+                {
+                    "name": "cluster",
+                    "type": "string",
+                    "default": ""
+                }
+            ]
         }
     ]
 }
