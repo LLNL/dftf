@@ -11,6 +11,7 @@ import dateutil
 import dateutil.parser
 import functools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import itertools
 import json
 import logging
 from math import floor
@@ -231,44 +232,69 @@ def find_subscription(session,
     return None
 
 def update_subscriptions(host, destination):
-    """Update subscriptions for 'hosts'
+    """Update subscriptions for 'host'
 
-    First what if subscriptions exist for 'host', and only add
+    Check what, if any, subscriptions exist for 'host', and only add
     subscriptions that are missing."""
 
-    session = redfish.redfish_client(base_url="https://"+host,
-                                     username=config.redfish_username,
-                                     password=config.redfish_password,
-                                     default_prefix="/redfish/v1")
-    session.login(auth="session")
 
-    subscriptions = redfish_utilities.get_event_subscriptions(session)
+    sub1_exists = False
+    sub2_exists = False
 
-    client_context="lc_metric_events"
-    event_types=["Alert"]
-    registries=["CrayTelemetry"]
-    sub = find_subscription(session, subscriptions, destination,
-                            client_context, event_types, registries)
-    if sub is None and config.kafka:
-        response = redfish_utilities.create_event_subscription(
-            context=session,
-            destination=destination,
-            client_context=client_context,
-            event_types=event_types,
-            registries=registries)
+    try:
+        session = redfish.redfish_client(base_url="https://"+host,
+                                         username=config.redfish_username,
+                                         password=config.redfish_password,
+                                         default_prefix="/redfish/v1",
+                                         timeout=10,
+                                         max_retry=0)
+        session.login(auth="session")
+    except:
+        return (sub1_exists, sub2_exists)
 
-    client_context="lc_other_events"
-    event_types=["Alert"]
-    sub = find_subscription(session, subscriptions, destination,
-                            client_context, event_types)
-    if sub is None:
-        response = redfish_utilities.create_event_subscription(
-            context=session,
-            destination=destination,
-            client_context=client_context,
-            event_types=event_types)
+    try:
+        subscriptions = redfish_utilities.get_event_subscriptions(session)
 
-    session.logout()
+        client_context="lc_metric_events"
+        event_types=["Alert"]
+        registries=["CrayTelemetry"]
+        sub = find_subscription(session, subscriptions, destination,
+                                client_context, event_types, registries)
+        if sub is not None:
+            sub1_exists = True
+        else if config.kafka:
+            response = redfish_utilities.create_event_subscription(
+                context=session,
+                destination=destination,
+                client_context=client_context,
+                event_types=event_types,
+                registries=registries)
+            if response:
+                sub1_exists = True
+
+        client_context="lc_other_events"
+        event_types=["Alert"]
+        sub = find_subscription(session, subscriptions, destination,
+                                client_context, event_types)
+        if sub is not None:
+            sub2_exists = True
+        else:
+            response = redfish_utilities.create_event_subscription(
+                context=session,
+                destination=destination,
+                client_context=client_context,
+                event_types=event_types)
+            if response:
+                sub2_exists = True
+    except:
+        return (sub1_exists, sub2_exists)
+    finally:
+        try:
+            session.logout()
+        except:
+            pass
+
+    return (sub1_exists, sub2_exists)
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def __init__(self, worker_queue, sample_period, *args, **kwargs):
@@ -599,14 +625,21 @@ def subscriber_process(subscriber_queue, ip_address, port):
     while True:
         before = floor(time.time())
         logger.debug('start (re)subscription procedure')
-        for host in config.hosts:
-            logger.log(DEBUG2, f'updating subscribtion for {host}')
-            try:
-                update_subscriptions(host, destination=destination)
-            except:
-                logger.warning(f'Failed to update subscription for "{host}"')
-        logger.debug('end (re)subscription procedure')
+        num_pool_processes = min(200, len(config.hosts))
+        with multiprocessing.Pool(num_pool_processes) as pool:
+            args = zip(config.hosts, itertools.repeat(destination))
+            result = pool.starmap_async(update_subscriptions, args)
+            while not result.ready():
+                # Check for the abort signal from the control process
+                try:
+                    subscriber_queue.get(block=True, timeout=1)
+                except queue.Empty:
+                    # no signal, just keep working
+                    pass
+                else:
+                    return
         after = floor(time.time())
+        logger.debug(f'end (re)subscription procedure ({after - before}s)')
         sleep_time = config.resubscribe_interval - (after - before)
         if sleep_time < 1:
             logger.warning(f'subscription updates are taking longer than resubscribe_interval of {config.resubscribe_interval}')
