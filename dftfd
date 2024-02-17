@@ -262,7 +262,7 @@ def update_subscriptions(host, destination):
                                 client_context, event_types, registries)
         if sub is not None:
             sub1_exists = True
-        else if config.kafka:
+        elif config.kafka:
             response = redfish_utilities.create_event_subscription(
                 context=session,
                 destination=destination,
