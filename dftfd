@@ -246,8 +246,8 @@ def update_subscriptions(host, destination):
                                          username=config.redfish_username,
                                          password=config.redfish_password,
                                          default_prefix="/redfish/v1",
-                                         timeout=10,
-                                         max_retry=0)
+                                         timeout=config.subscription_timeout,
+                                         max_retry=config.subscription_retries)
         session.login(auth="session")
     except:
         return (sub1_exists, sub2_exists)
@@ -701,6 +701,8 @@ def parse_configuration():
     parser.add_argument("--log_alerts_file", type=str)
     parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
     parser.add_argument("--sample_period", type=int, default=0)
+    parser.add_argument("--subscription_timeout", type=int, default=10)
+    parser.add_argument("--subscription_retries", type=int, default=1)
 
     args = parser.parse_args(argv)
 
