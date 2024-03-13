@@ -204,39 +204,34 @@ def getent_hosts(hostname_or_ip, return_field_number):
 
     return hosts[return_field_number]
 
-def find_subscription(session,
-                      subscriptions,
-                      destination,
-                      client_context,
-                      event_types=None,
-                      registries=None):
+def find_and_purge_subscriptions(session,
+                                 subscriptions,
+                                 destination,
+                                 contexts):
+    """Returns a list of contexts for subscriptions that are found.
+
+       As it works, any subscriptions that have our destination, but the wrong context,
+       will be removed.
+    """
+    found_contexts = []
+
     for sub in subscriptions:
         if sub['Destination'] != destination:
             continue
-        if event_types is not None and ('EventTypes' not in sub or sub['EventTypes'] != event_types):
-            continue
-        if event_types is None and 'EventTypes' in sub:
-            continue
-        if registries is not None and ('RegistryPrefixes' not in sub or sub['RegistryPrefixes'] != registries):
-            continue
-        if registries is None and 'RegistryPrefixes' in sub:
-            continue
-        if 'Context' not in sub:
-            continue
-        if sub['Context'] != client_context:
-            # It otherwise matches, but the context string is wrong. Delete
-            # it so it will be recreated with the correct name.
+        if 'Context' not in sub or sub['Context'] not in contexts:
+            logger.warning(f'purging subscription {sub}')
             session.delete(sub['@odata.id'])
             continue
-        return sub
-    return None
+        found_contexts.append(sub['Context'])
+
+    logger.debug(f'found existing subscriptions {found_contexts}')
+    return found_contexts
 
 def update_subscriptions(host, destination):
     """Update subscriptions for 'host'
 
     Check what, if any, subscriptions exist for 'host', and only add
     subscriptions that are missing."""
-
 
     sub1_exists = False
     sub2_exists = False
@@ -254,36 +249,30 @@ def update_subscriptions(host, destination):
 
     try:
         subscriptions = redfish_utilities.get_event_subscriptions(session)
+        contexts = {"telemetry": "dftfd_CrayTelemetry",
+                    "all": "dftfd_all"}
+        found = find_and_purge_subscriptions(session, subscriptions,
+                                             destination, contexts.values())
 
-        client_context="lc_metric_events"
-        event_types=["Alert"]
-        registries=["CrayTelemetry"]
-        sub = find_subscription(session, subscriptions, destination,
-                                client_context, event_types, registries)
-        if sub is not None:
+        if contexts["telemetry"] in found:
             sub1_exists = True
         elif config.kafka:
             response = redfish_utilities.create_event_subscription(
                 context=session,
                 destination=destination,
-                client_context=client_context,
-                event_types=event_types,
-                registries=registries)
+                client_context=contexts["telemetry"],
+                registries=["CrayTelemetry"])
             if response:
                 sub1_exists = True
 
-        client_context="lc_other_events"
-        event_types=["Alert"]
-        sub = find_subscription(session, subscriptions, destination,
-                                client_context, event_types)
-        if sub is not None:
+        if contexts["all"] in found:
             sub2_exists = True
         else:
             response = redfish_utilities.create_event_subscription(
                 context=session,
                 destination=destination,
-                client_context=client_context,
-                event_types=event_types)
+                client_context=contexts["all"],
+                registries=[])
             if response:
                 sub2_exists = True
     except:
