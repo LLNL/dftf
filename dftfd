@@ -286,7 +286,7 @@ def update_subscriptions(host, destination):
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def __init__(self, worker_queues, worker_mapping, sample_period,
                  *args, **kwargs):
-        self.worker_queue = worker_queue
+        self.worker_queues = worker_queues
         self.worker_mapping = worker_mapping
         self.sample_period = sample_period
         super().__init__(*args, **kwargs)
@@ -310,7 +310,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         except:
             logger.warning(f'IP {client_ip} does not have a preassigned worker, perhaps IP lookup failed?')
             idx = random.randrange(0, len(worker_queues))
-        self.worker_queue[idx].put((self.path, self.headers, client_ip, post_data))
+        self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
