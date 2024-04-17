@@ -309,7 +309,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
             idx = worker_mapping[client_ip]
         except:
             logger.warning(f'IP {client_ip} does not have a preassigned worker, perhaps IP lookup failed?')
-            idx = random.randrange(0, len(worker_queues))
+            idx = random.randrange(0, len(self.worker_queues))
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
         self.send_response(200)
