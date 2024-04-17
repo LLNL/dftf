@@ -309,7 +309,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         except:
             logger.warning(f'IP {client_ip} does not have a preassigned worker, perhaps IP lookup failed?')
             idx = random.randrange(0, len(self.worker_queues))
-        logger.debug(f'queueing POSTed content from {client_ip} to idx {idx}, content length = {content_length}')
+        logger.debug(f'Assigning POSTed content from {client_ip} to Worker-{idx}, content length = {content_length}')
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
         self.send_response(200)
@@ -571,7 +571,6 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             break
 
         # decode the message
-        logger.debug(f'start handling http POST')
         ts = time.time()
         try:
             (path, headers, client_ip, data) = work
@@ -640,7 +639,6 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             logger.log(DEBUG2, f"events: {events_count}")
         if metrics_avail > 0:
             logger.log(DEBUG2, f"kept metrics: {metrics_avail-metrics_dropped}, dropped metrics: {metrics_dropped}({(metrics_dropped)/metrics_avail*100:.1f}%)")
-        logger.debug('end handling http POST')
 
 def subscriber_process(subscriber_queue, ip_address, port):
     destination = ip_address+":"+str(port)
@@ -765,10 +763,11 @@ def main():
 
     worker_queues = []
     workers = []
-    for _ in range(config.worker_count):
+    for i in range(config.worker_count):
         worker_queue = multiprocessing.Queue()
         worker_queues.append(worker_queue)
         worker = multiprocessing.Process(target=worker_process,
+                                         name='Worker-{i}',
                                          args=(worker_queue,
                                                kafka_conf,
                                                schema_registry_conf))
@@ -777,6 +776,7 @@ def main():
 
     subscriber_queue = multiprocessing.Queue()
     subscriber = multiprocessing.Process(target=subscriber_process,
+                                         name='Subscriber',
                                          args=(subscriber_queue, config.address, config.port))
     subscriber.start()
 
