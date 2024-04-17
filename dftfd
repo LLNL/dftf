@@ -409,8 +409,6 @@ def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_seri
     topic = config.topic_prefix+"craytelemetry"
     try:
         producer.produce(topic=topic,
-                         key=string_serializer(hostname,
-                                               SerializationContext(topic, MessageField.KEY)),
                          value=metrics_serializer(sensor,
                                                SerializationContext(topic, MessageField.VALUE)),
                          on_delivery=delivery_report)
@@ -480,8 +478,6 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         topic = config.topic_prefix+"crayevents"
         try:
             producer.produce(topic=topic,
-                             key=string_serializer(hostname,
-                                                   SerializationContext(topic, MessageField.KEY)),
                              value=events_serializer(event,
                                                      SerializationContext(topic, MessageField.VALUE)),
                              on_delivery=delivery_report)
