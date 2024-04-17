@@ -14,11 +14,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import itertools
 import json
 import logging
-from math import floor
+from math import ceil, floor
 import multiprocessing
 import os
 import platform
 import pprint
+import random
 import redfish
 import redfish_utilities
 import subprocess
@@ -53,7 +54,6 @@ logger = None
 hostname = platform.node()
 cluster_name = hostname.rstrip('0123456789')
 log_alerts_file = None
-client_last_accepted = {}
 
 metrics_schema = """{
     "name": "RedfishCrayOemSensors",
@@ -192,17 +192,15 @@ def get_name(hostname_or_ip):
     return name
 get_name.cache = {}
 
-def getent_hosts(hostname_or_ip, return_field_number):
-    hosts = []
+def getent_hosts(hostname_or_ip):
+    hosts = None
     try:
         hosts = subprocess.run(['getent', 'hosts', hostname_or_ip], stdout=subprocess.PIPE)
         hosts = hosts.stdout.decode("utf-8").split()
     except:
-        pass
-    if len(hosts) < return_field_number+1:
-        return hostname_or_ip
+        raise
 
-    return hosts[return_field_number]
+    return hosts
 
 def find_and_purge_subscriptions(session,
                                  subscriptions,
@@ -286,10 +284,13 @@ def update_subscriptions(host, destination):
     return (sub1_exists, sub2_exists)
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
-    def __init__(self, worker_queue, sample_period, *args, **kwargs):
+    def __init__(self, worker_queues, worker_mapping, sample_period,
+                 *args, **kwargs):
         self.worker_queue = worker_queue
+        self.worker_mapping = worker_mapping
         self.sample_period = sample_period
         super().__init__(*args, **kwargs)
+
     def log_request(self, code='-', size='-'):
         # silence internal library messages for each request
         return
@@ -299,32 +300,44 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.send_response_only(405)
 
     def do_POST(self):
-        global client_last_accepted
-
-        ts = time.time()
         client_ip = self.client_address[0]
-        if client_ip not in client_last_accepted:
-            client_last_accepted[client_ip] = 0
-        delta = ts - client_last_accepted[client_ip]
-
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
 
-        if delta >= self.sample_period:
-            logger.debug(f'queueing POSTed content from {client_ip}, delta {delta:.2f}s, content length = {content_length}')
-            self.worker_queue.put((self.path, self.headers, client_ip, post_data))
-            client_last_accepted[client_ip] = ts
-        else:
-            logger.debug(f'skipping POSTed content from {client_ip}, delta {delta:.2f}s, content length = {content_length}')
+        logger.debug(f'queueing POSTed content from {client_ip}, content length = {content_length}')
+        try:
+            idx = worker_mapping[client_ip]
+        except:
+            logger.warning(f'IP {client_ip} does not have a preassigned worker, perhaps IP lookup failed?')
+            idx = random.randrange(0, len(worker_queues))
+        self.worker_queue[idx].put((self.path, self.headers, client_ip, post_data))
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
 
-def run_http_server(worker_queue, ip_address, port):
+def run_http_server(worker_queues, ip_address, port):
+    # Assign redfish server IP to fixed worker processes
+    ips = []
+    for host in config.hosts:
+        try:
+            ips.append(getent_hosts(host)[0])
+        except:
+            logger.warning(f'failed to look up IP of {host} using "getent hosts"')
+    num_workers = len(worker_queues)
+    num_ips = len(ips)
+    indices = sorted(list(range(num_workers)) * ceil(num_ips/num_workers))
+    random.shuffle(indices)
+    # worker_mapping is a dict, the keys are IPs of incoming redfish
+    # servers, and the values are indices into the worker_queues array.
+    worker_mapping = dict(zip(ips, indices))
+
     server_address = (ip_address, int(port))
-    handler = functools.partial(Handle_HTTP_Connection, worker_queue, config.sample_period)
+    handler = functools.partial(Handle_HTTP_Connection,
+                                worker_queues,
+                                worker_mapping,
+                                config.sample_period)
     httpd = ThreadingHTTPServer(server_address, handler)
     logger.debug(f'Starting http server on port {port}')
     try:
@@ -538,6 +551,7 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                                            conf=avro_serializer_conf)
         producer = Producer(kafka_conf)
 
+    client_last_accepted = {}
     while True:
         try:
             work = worker_queue.get()
@@ -555,8 +569,10 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                 producer.flush()
             worker_queue.put(None)
             break
-        # process the message
+
+        # decode the message
         logger.debug(f'start handling http POST')
+        ts = time.time()
         try:
             (path, headers, client_ip, data) = work
         except:
@@ -573,6 +589,27 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             logger.error(f'Failed JSON decode of data from {client_ip}, data starts with: "{data_decoded[:40]}"')
             continue
 
+        # Filter out CrayTelemetry if config.sample_period has not expired
+        is_cray_telemetry = False
+        for event in json_data['Events']:
+            if event_is(event, 'CrayTelemetry'):
+                is_cray_telemetry = True
+                break
+        if is_cray_telemetry:
+            if client_ip not in client_last_accepted:
+                client_last_accepted[client_ip] = 0
+            delta = ts - client_last_accepted[client_ip]
+            if delta < config.sample_period:
+                # Discard the CrayTelemtry events
+                logger.debug(f'skipping CrayTelemetry event from {client_ip}, delta {delta:.2f}s')
+                continue
+            else:
+                logger.debug(f'processing CrayTelemetry event from {client_ip}, delta {delta:.2f}s')
+                client_last_accepted[client_ip] = ts
+        else:
+            logger.debug(f'processing other event from {client_ip}')
+
+        # Publish the remaining events
         metrics_dict = {}
         metrics_avail = 0
         metrics_dropped = 0
@@ -703,7 +740,11 @@ def parse_configuration():
 
     # Lookup the ip_address of this node on the "switch" VLAN
     if not args.address:
-        args.address = getent_hosts(hostname+'-shasta', 0)
+        shasta_name = hostname+'-shasta'
+        try:
+            args.address = getent_hosts(shasta_name)[0]
+        except:
+            args.address = shasta_name
 
     if args.log_alerts_file:
         global log_alerts_file
@@ -722,30 +763,33 @@ def main():
     config, kafka_conf, schema_registry_conf = parse_configuration()
     logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.verbosity])
 
-    worker_queue = multiprocessing.Queue()
+    worker_queues = []
     workers = []
     for _ in range(config.worker_count):
+        worker_queue = multiprocessing.Queue()
+        worker_queues.append(worker_queue)
         worker = multiprocessing.Process(target=worker_process,
                                          args=(worker_queue,
                                                kafka_conf,
                                                schema_registry_conf))
-        worker.start()
         workers.append(worker)
+        worker.start()
 
     subscriber_queue = multiprocessing.Queue()
     subscriber = multiprocessing.Process(target=subscriber_process,
                                          args=(subscriber_queue, config.address, config.port))
     subscriber.start()
 
-    run_http_server(worker_queue, config.address, port=config.port)
+    run_http_server(worker_queues, config.address, port=config.port)
 
     # Signal exit by putting "None" in the various queues
     subscriber_queue.put(None)
     subscriber_queue.close()
-    worker_queue.put(None)
-    worker_queue.close()
-    for process in workers:
-        process.join()
+    for worker_queue in worker_queues:
+        worker_queue.put(None)
+        worker_queue.close()
+    for worker in workers:
+        worker.join()
     subscriber.join()
 
 if __name__ == '__main__':
