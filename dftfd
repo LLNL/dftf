@@ -767,7 +767,7 @@ def main():
         worker_queue = multiprocessing.Queue()
         worker_queues.append(worker_queue)
         worker = multiprocessing.Process(target=worker_process,
-                                         name='Worker-{i}',
+                                         name=f'Worker-{i}',
                                          args=(worker_queue,
                                                kafka_conf,
                                                schema_registry_conf))
