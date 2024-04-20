@@ -20,8 +20,6 @@ import os
 import platform
 import pprint
 import random
-import redfish
-import redfish_utilities
 import subprocess
 import sys
 import time
@@ -224,64 +222,6 @@ def find_and_purge_subscriptions(session,
 
     logger.debug(f'found existing subscriptions {found_contexts}')
     return found_contexts
-
-def update_subscriptions(host, destination):
-    """Update subscriptions for 'host'
-
-    Check what, if any, subscriptions exist for 'host', and only add
-    subscriptions that are missing."""
-
-    sub1_exists = False
-    sub2_exists = False
-
-    try:
-        session = redfish.redfish_client(base_url="https://"+host,
-                                         username=config.redfish_username,
-                                         password=config.redfish_password,
-                                         default_prefix="/redfish/v1",
-                                         timeout=config.subscription_timeout,
-                                         max_retry=config.subscription_retries)
-        session.login(auth="session")
-    except:
-        return (sub1_exists, sub2_exists)
-
-    try:
-        subscriptions = redfish_utilities.get_event_subscriptions(session)
-        contexts = {"telemetry": "dftfd_CrayTelemetry",
-                    "all": "dftfd_all"}
-        found = find_and_purge_subscriptions(session, subscriptions,
-                                             destination, contexts.values())
-
-        if contexts["telemetry"] in found:
-            sub1_exists = True
-        elif config.kafka:
-            response = redfish_utilities.create_event_subscription(
-                context=session,
-                destination=destination,
-                client_context=contexts["telemetry"],
-                registries=["CrayTelemetry"])
-            if response:
-                sub1_exists = True
-
-        if contexts["all"] in found:
-            sub2_exists = True
-        else:
-            response = redfish_utilities.create_event_subscription(
-                context=session,
-                destination=destination,
-                client_context=contexts["all"],
-                registries=[])
-            if response:
-                sub2_exists = True
-    except:
-        return (sub1_exists, sub2_exists)
-    finally:
-        try:
-            session.logout()
-        except:
-            pass
-
-    return (sub1_exists, sub2_exists)
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
     def __init__(self, worker_queues, worker_mapping, sample_period,
@@ -640,42 +580,6 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         if metrics_avail > 0:
             logger.log(DEBUG2, f"kept metrics: {metrics_avail-metrics_dropped}, dropped metrics: {metrics_dropped}({(metrics_dropped)/metrics_avail*100:.1f}%)")
 
-def subscriber_process(subscriber_queue, ip_address, port):
-    destination = ip_address+":"+str(port)
-    while True:
-        before = floor(time.time())
-        logger.debug('start (re)subscription procedure')
-        num_pool_processes = min(200, len(config.hosts))
-        with multiprocessing.Pool(num_pool_processes) as pool:
-            args = zip(config.hosts, itertools.repeat(destination))
-            result = pool.starmap_async(update_subscriptions, args)
-            while not result.ready():
-                # Check for the abort signal from the control process
-                try:
-                    subscriber_queue.get(block=True, timeout=1)
-                except queue.Empty:
-                    # no signal, just keep working
-                    pass
-                else:
-                    return
-        after = floor(time.time())
-        logger.debug(f'end (re)subscription procedure ({after - before}s)')
-        sleep_time = config.resubscribe_interval - (after - before)
-        if sleep_time < 1:
-            logger.warning(f'subscription updates are taking longer than resubscribe_interval of {config.resubscribe_interval}')
-            sleep_time = 0
-        try:
-            subscriber_queue.get(block=True, timeout=sleep_time)
-        except queue.Empty:
-            # The timeout is just used to wake this process up for the next round of
-            # subscription udpates.
-            pass
-        except KeyboardInterrupt:
-            return
-        else:
-            # Getting _any_ message means it is time to exit
-            return
-
 def parse_configuration():
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument("-c", "--conf_file",
@@ -714,15 +618,12 @@ def parse_configuration():
     parser.add_argument("-A", "--address")
     parser.add_argument("-P", "--port", type=int, default=8093)
     parser.add_argument("-t", "--topic_prefix", default="timeseries-redfish-")
-    parser.add_argument("--resubscribe_interval", type=int, default=3600)
     parser.add_argument("-w", "--worker_count", type=int, default=16)
     parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
     parser.add_argument("--log_alerts", action='store_true', default=False)
     parser.add_argument("--log_alerts_file", type=str)
     parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
     parser.add_argument("--sample_period", type=int, default=0)
-    parser.add_argument("--subscription_timeout", type=int, default=10)
-    parser.add_argument("--subscription_retries", type=int, default=1)
 
     args = parser.parse_args(argv)
 
@@ -774,23 +675,14 @@ def main():
         workers.append(worker)
         worker.start()
 
-    subscriber_queue = multiprocessing.Queue()
-    subscriber = multiprocessing.Process(target=subscriber_process,
-                                         name='Subscriber',
-                                         args=(subscriber_queue, config.address, config.port))
-    subscriber.start()
-
     run_http_server(worker_queues, config.address, port=config.port)
 
     # Signal exit by putting "None" in the various queues
-    subscriber_queue.put(None)
-    subscriber_queue.close()
     for worker_queue in worker_queues:
         worker_queue.put(None)
         worker_queue.close()
     for worker in workers:
         worker.join()
-    subscriber.join()
 
 if __name__ == '__main__':
     main()

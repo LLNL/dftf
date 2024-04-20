@@ -1,0 +1,13 @@
+[general]
+port=8093
+topic_prefix=myprefix-
+redfish_username=<USERNAME>
+redfish_password=<PASSWORD>
+worker_count=12
+verbosity=warning
+
+[kafka]
+bootstrap.servers=<hostnamename>:9092
+
+[schema_registry]
+url=http://<hostname>:8081
