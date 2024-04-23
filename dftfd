@@ -247,8 +247,8 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         try:
             idx = self.worker_mapping[client_ip]
         except:
-            logger.warning(f'IP {client_ip} does not have a preassigned worker, perhaps IP lookup failed?')
             idx = random.randrange(0, len(self.worker_queues))
+            self.worker_mapping[client_ip] = idx
         logger.debug(f'Assigning POSTed content from {client_ip} to Worker-{idx}, content length = {content_length}')
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
