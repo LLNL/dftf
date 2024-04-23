@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import argparse
+from collections import defaultdict
 import configparser
 import dateutil
 import dateutil.parser
@@ -244,11 +245,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
 
-        try:
-            idx = self.worker_mapping[client_ip]
-        except:
-            idx = random.randrange(0, len(self.worker_queues))
-            self.worker_mapping[client_ip] = idx
+        idx = self.worker_mapping[client_ip]
         logger.debug(f'Assigning POSTed content from {client_ip} to Worker-{idx}, content length = {content_length}')
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
@@ -257,23 +254,12 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
 
-def run_http_server(worker_queues, ip_address, port):
-    # Assign redfish server IP to fixed worker processes
-    ips = []
-    for host in config.hosts:
-        try:
-            ips.append(getent_hosts(host)[0])
-        except:
-            logger.warning(f'failed to look up IP of {host} using "getent hosts"')
-    num_workers = len(worker_queues)
-    num_ips = len(ips)
-    indices = sorted(list(range(num_workers)) * ceil(num_ips/num_workers))
-    random.shuffle(indices)
-    # worker_mapping is a dict, the keys are IPs of incoming redfish
-    # servers, and the values are indices into the worker_queues array.
-    worker_mapping = dict(zip(ips, indices))
+def random_worker_index():
+    return random.randrange(0, config.worker_count)
 
+def run_http_server(worker_queues, ip_address, port):
     server_address = (ip_address, int(port))
+    worker_mapping = defaultdict(random_worker_index)
     handler = functools.partial(Handle_HTTP_Connection,
                                 worker_queues,
                                 worker_mapping,
