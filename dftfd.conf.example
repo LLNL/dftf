@@ -1,8 +1,6 @@
 [general]
 port=8093
 topic_prefix=myprefix-
-redfish_username=<USERNAME>
-redfish_password=<PASSWORD>
 worker_count=12
 verbosity=warning
 
