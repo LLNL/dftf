@@ -599,8 +599,6 @@ def parse_configuration():
 
     parser = argparse.ArgumentParser(parents=[parent_parser])
     parser.set_defaults(**defaults)
-    parser.add_argument("-u", "--redfish_username")
-    parser.add_argument("-p", "--redfish_password")
     parser.add_argument("-A", "--address")
     parser.add_argument("-P", "--port", type=int, default=8093)
     parser.add_argument("-t", "--topic_prefix", default="timeseries-redfish-")
@@ -614,14 +612,6 @@ def parse_configuration():
     args = parser.parse_args(argv)
 
     args_dict = vars(args)
-    missing = False
-    if args.kafka:
-        for required in "redfish_username", "redfish_password":
-            if required not in args_dict or args_dict[required] is None:
-                print(f'"{required}" must be supplied in the configuration file, or on the command line')
-                missing = True
-    if missing:
-        sys.exit(1)
 
     # Lookup the ip_address of this node on the "switch" VLAN
     if not args.address:
