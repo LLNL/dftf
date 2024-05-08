@@ -31,7 +31,7 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.schema_registry import record_subject_name_strategy
 
-CLOCK_SKEW_LIMIT_SEC=300
+CLOCK_SKEW_LIMIT_SEC=3600
 
 DEBUG2=logging.DEBUG-1
 DEBUG3=logging.DEBUG-2
@@ -254,12 +254,15 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
 
-def random_worker_index():
-    return random.randrange(0, config.worker_count)
+def next_worker_index(worker_count):
+    idx = 0
+    while True:
+        yield idx
+        idx = (idx + 1) % worker_count
 
 def run_http_server(worker_queues, ip_address, port):
     server_address = (ip_address, int(port))
-    worker_mapping = defaultdict(random_worker_index)
+    worker_mapping = defaultdict(next_worker_index(config.worker_count).__next__)
     handler = functools.partial(Handle_HTTP_Connection,
                                 worker_queues,
                                 worker_mapping,
@@ -280,7 +283,7 @@ def removeprefix(string_val, prefix):
     else:
         return string_val
 
-def get_sensors_CrayTelemetry(event):
+def get_sensors_cray_telemetry(event):
     eventname = removeprefix(event['MessageId'], 'CrayTelemetry.')
     sensor_ignored_count = 0
     for sensor in event['Oem']['Sensors']:
@@ -344,18 +347,6 @@ def get_sensors_CrayTelemetry(event):
 
         yield (sensor_name, sensor)
 
-def queue_sensor_CrayTelemetry(sensor, producer, metrics_serializer, string_serializer):
-    topic = config.topic_prefix+"craytelemetry"
-    try:
-        producer.produce(topic=topic,
-                         value=metrics_serializer(sensor,
-                                               SerializationContext(topic, MessageField.VALUE)),
-                         on_delivery=delivery_report)
-    except KeyboardInterrupt:
-        pass
-    except ValueError:
-        logger.error("invalid input for kafka topic, discarding record")
-
 # returns integers milliseconds-since-epoch
 WARNING_LIMIT_MS = 24*60*60*1000
 def parse_timestamp(timestamp_string, location):
@@ -381,7 +372,67 @@ redfish_to_syslog_severity = {
     "Warning": "warning",
     "Critical": "error"
 }
-def handle_event_normal(event, producer, events_serializer, string_serializer, client_ip):
+
+def delivery_report(err, msg):
+    """
+    Reports the failure or success of a message delivery.
+
+    Args:
+        err (KafkaError): The error that occurred on None on success.
+
+        msg (Message): The message that was produced or failed.
+
+    Note:
+        In the delivery report callback the Message.key() and Message.value()
+        will be the binary format as encoded by any configured Serializers and
+        not the same object that was passed to produce().
+        If you wish to pass the original object(s) for key and value to delivery
+        report callback we recommend a bound callback or lambda where you pass
+        the objects along.
+    """
+
+    if err is not None:
+        logger.error(f'Delivery failed for record: {err}')
+        return
+    logger.log(DEBUG3, f'record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
+
+def process_cray_telemetry(ts, client_ip, event, producer, serializer):
+    # Filter out CrayTelemetry if config.sample_period has not expired
+    event_id = (client_ip, event['MessageId'])
+    delta = ts - process_cray_telemetry.last_accepted[event_id]
+    if delta < config.sample_period:
+        # Discard the CrayTelemtry events
+        logger.debug(f'skipping CrayTelemetry event {event_id}, delta {delta:.2f}s')
+        return
+    process_cray_telemetry.last_accepted[event_id] = ts
+
+    logger.debug(f'processing CrayTelemetry event {event_id}, delta {delta:.2f}s')
+
+    metrics_dict = {}
+    # look through all sensors, and only keep the most
+    # recent values for each unique sensor
+    for sensor_name, sensor in get_sensors_cray_telemetry(event):
+        if sensor_name not in metrics_dict:
+            metrics_dict[sensor_name] = sensor
+        elif metrics_dict[sensor_name]['timestamp'] < sensor['timestamp']:
+            metrics_dict[sensor_name] = sensor
+    topic = config.topic_prefix+"craytelemetry"
+    for metric in metrics_dict.values():
+        if not config.kafka:
+            continue
+        try:
+            producer.produce(topic=topic,
+                             value=serializer(metric,
+                                              SerializationContext(topic, MessageField.VALUE)),
+                             on_delivery=delivery_report)
+        except KeyboardInterrupt:
+            pass
+        except ValueError:
+            logger.error("invalid input for kafka topic, discarding record")
+process_cray_telemetry.last_accepted = defaultdict(int)
+
+def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
+    logger.debug(f'processing generic redfish event {client_ip}')
     # client_ip is the IP address as a string
     client_hostname = get_name(client_ip)
     if 'EventTimestamp' not in event:
@@ -417,50 +468,17 @@ def handle_event_normal(event, producer, events_serializer, string_serializer, c
         topic = config.topic_prefix+"crayevents"
         try:
             producer.produce(topic=topic,
-                             value=events_serializer(event,
-                                                     SerializationContext(topic, MessageField.VALUE)),
+                             value=serializer(event,
+                                              SerializationContext(topic, MessageField.VALUE)),
                              on_delivery=delivery_report)
         except KeyboardInterrupt:
             pass
         except ValueError:
             logger.error("invalid input for kafka topic, discarding record")
 
-def delivery_report(err, msg):
-    """
-    Reports the failure or success of a message delivery.
-
-    Args:
-        err (KafkaError): The error that occurred on None on success.
-
-        msg (Message): The message that was produced or failed.
-
-    Note:
-        In the delivery report callback the Message.key() and Message.value()
-        will be the binary format as encoded by any configured Serializers and
-        not the same object that was passed to produce().
-        If you wish to pass the original object(s) for key and value to delivery
-        report callback we recommend a bound callback or lambda where you pass
-        the objects along.
-    """
-
-    if err is not None:
-        logger.error(f'Delivery failed for record: {err}')
-        return
-    logger.log(DEBUG3, f'record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
-
-def event_is(event, message_id_prefix):
-    prefix_len = len(message_id_prefix)
-    if event['MessageId'][:prefix_len] == message_id_prefix:
-        return True
-    else:
-        return False
-
 def worker_process(worker_queue, kafka_conf, schema_registry_conf):
-    logger.debug('start')
-
     producer = None
     metrics_serializer = None
-    string_serializer = None
     events_serializer = None
     if config.kafka:
         schema_registry_client = SchemaRegistryClient(schema_registry_conf)
@@ -470,14 +488,12 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                                             metrics_schema,
                                             to_dict=None,
                                             conf=avro_serializer_conf)
-        string_serializer = StringSerializer('utf_8')
         events_serializer = AvroSerializer(schema_registry_client,
                                            events_schema,
                                            to_dict=None,
                                            conf=avro_serializer_conf)
         producer = Producer(kafka_conf)
 
-    client_last_accepted = {}
     while True:
         try:
             work = worker_queue.get()
@@ -514,57 +530,16 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             logger.error(f'Failed JSON decode of data from {client_ip}, data starts with: "{data_decoded[:40]}"')
             continue
 
-        # Filter out CrayTelemetry if config.sample_period has not expired
-        is_cray_telemetry = False
+        # process the Events in the message
         for event in json_data['Events']:
-            if event_is(event, 'CrayTelemetry'):
-                is_cray_telemetry = True
-                break
-        if is_cray_telemetry:
-            if client_ip not in client_last_accepted:
-                client_last_accepted[client_ip] = 0
-            delta = ts - client_last_accepted[client_ip]
-            if delta < config.sample_period:
-                # Discard the CrayTelemtry events
-                logger.debug(f'skipping CrayTelemetry event from {client_ip}, delta {delta:.2f}s')
-                continue
+            if event['MessageId'].startswith('CrayTelemetry'):
+                process_cray_telemetry(ts, client_ip, event,
+                                       producer, metrics_serializer)
             else:
-                logger.debug(f'processing CrayTelemetry event from {client_ip}, delta {delta:.2f}s')
-                client_last_accepted[client_ip] = ts
-        else:
-            logger.debug(f'processing other event from {client_ip}')
-
-        # Publish the remaining events
-        metrics_dict = {}
-        metrics_avail = 0
-        metrics_dropped = 0
-        events_count = 0
-        for event in json_data['Events']:
-            if event_is(event, 'CrayTelemetry'):
-                # look through all sensors, and only keep the most
-                # recent values for each unique sensor
-                for sensor_name, sensor in get_sensors_CrayTelemetry(event):
-                    metrics_avail += 1
-                    if sensor_name not in metrics_dict:
-                        metrics_dict[sensor_name] = sensor
-                    elif metrics_dict[sensor_name]['timestamp'] < sensor['timestamp']:
-                        metrics_dict[sensor_name] = sensor
-                        metrics_dropped += 1
-                    else:
-                        metrics_dropped += 1
-            else:
-                handle_event_normal(event, producer, events_serializer, string_serializer, client_ip)
-                events_count += 1
-        for metric in metrics_dict.values():
-            if config.kafka:
-                queue_sensor_CrayTelemetry(metric, producer, metrics_serializer, string_serializer)
+                process_generic_redfish_event(ts, client_ip, event,
+                                              producer, events_serializer)
         if config.kafka:
             producer.poll(0.0)
-
-        if events_count > 0:
-            logger.log(DEBUG2, f"events: {events_count}")
-        if metrics_avail > 0:
-            logger.log(DEBUG2, f"kept metrics: {metrics_avail-metrics_dropped}, dropped metrics: {metrics_dropped}({(metrics_dropped)/metrics_avail*100:.1f}%)")
 
 def parse_configuration():
     parent_parser = argparse.ArgumentParser(add_help=False)
