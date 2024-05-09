@@ -246,7 +246,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         post_data = self.rfile.read(content_length)
 
         idx = self.worker_mapping[client_ip]
-        logger.debug(f'Assigning POSTed content from {client_ip} to Worker-{idx}, content length = {content_length}')
+        logger.debug(f'Assigning Worker-{idx} content POSTed to path {self.path} from {client_ip}, content length = {content_length}')
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
         self.send_response(200)
@@ -530,14 +530,17 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             logger.error(f'Failed JSON decode of data from {client_ip}, data starts with: "{data_decoded[:40]}"')
             continue
 
-        # process the Events in the message
-        for event in json_data['Events']:
-            if event['MessageId'].startswith('CrayTelemetry'):
-                process_cray_telemetry(ts, client_ip, event,
-                                       producer, metrics_serializer)
-            else:
-                process_generic_redfish_event(ts, client_ip, event,
-                                              producer, events_serializer)
+        # process the the message
+        if path == '/redfish':
+            for event in json_data['Events']:
+                if event['MessageId'].startswith('CrayTelemetry'):
+                    process_cray_telemetry(ts, client_ip, event,
+                                           producer, metrics_serializer)
+                else:
+                    process_generic_redfish_event(ts, client_ip, event,
+                                                  producer, events_serializer)
+        elif path == '/slingshot':
+            pass
         if config.kafka:
             producer.poll(0.0)
 

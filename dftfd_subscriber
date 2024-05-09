@@ -137,7 +137,7 @@ def parse_config(cf):
                 sub = dict(subscription['properties'])
             except:
                 sub = dict()
-            sub['Destination'] = destination+':'+str(config['destinations_port'])
+            sub['Destination'] = destination+':'+str(config['destinations_port'])+'/redfish'
             if 'Context' not in sub:
                 try:
                     sub['Context'] = Config.context_prefix + subscription['context']
