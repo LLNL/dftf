@@ -1,6 +1,5 @@
 [general]
 port=8093
-topic_prefix=myprefix-
 worker_count=12
 verbosity=warning
 

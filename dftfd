@@ -160,6 +160,61 @@ events_schema = """{
 }
 """
 
+slingshot_health_schema = """{
+    "name": "CrayFabricHealth",
+    "type": "record",
+    "fields": [
+        {
+            "name": "timestamp",
+            "type": {
+                "type": "long",
+                "logicalType": "timestamp-millis"
+            }
+        },
+        {
+            "name": "Location",
+            "type": "string",
+            "default": ""
+        },
+        {
+            "name": "MessageId",
+            "type": "string",
+            "default": ""
+        },
+        {
+            "name": "message",
+            "type": "string",
+            "default": ""
+        },
+        {
+            "name": "Group",
+            "type": "int",
+            "default": 0
+        },
+        {
+            "name": "Switch",
+            "type": "int",
+            "default": 0
+        },
+        {
+            "name": "Port",
+            "type": "int",
+            "default": 0
+        },
+        {
+            "name": "Severity",
+            "type": "string",
+            "default": ""
+        },
+        {
+            "name": "PhysicalContext",
+            "type": "string",
+            "default": ""
+        }
+    ]
+}
+"""
+
 def get_name(hostname_or_ip):
     if hostname_or_ip not in get_name.cache:
         try:
@@ -416,7 +471,7 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
             metrics_dict[sensor_name] = sensor
         elif metrics_dict[sensor_name]['timestamp'] < sensor['timestamp']:
             metrics_dict[sensor_name] = sensor
-    topic = config.topic_prefix+"craytelemetry"
+    topic = "redfish-craytelemetry"
     for metric in metrics_dict.values():
         if not config.kafka:
             continue
@@ -465,7 +520,7 @@ def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
         logger.log(DEBUG3, f"{event['timestamp']} {event['Location']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
 
     if config.kafka:
-        topic = config.topic_prefix+"crayevents"
+        topic = "refish-crayevents"
         try:
             producer.produce(topic=topic,
                              value=serializer(event,
@@ -475,6 +530,67 @@ def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
             pass
         except ValueError:
             logger.error("invalid input for kafka topic, discarding record")
+
+def process_slingshot_health(ts, client_ip, event, producer, serializer):
+    message = {}
+    try:
+        message['timestamp'] = parse_timestamp(event['EventTimestamp'], client_ip)
+    except:
+        logger.warning(f'Message from {client_ip} is EventTimeStamp')
+        return
+    try:
+        message['MessageId'] = event['MessageId']
+    except:
+        logger.warning(f'Message from {client_ip} is missing MessageId')
+    try:
+        sensor = event['Oem']['Sensors'][0]
+    except:
+        logger.warning(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0]: {event}')
+        logger.debug(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0], event is: {event}')
+        return
+    if len(event['Oem']['Sensors']) > 1:
+        # if ever true, will need to change the code to loop over the Sensor array
+        logger.warning(f'Message {message["MessageId"]} from {client_ip}: more than one "sensor" in Oem.Sensors')
+    try:
+        message['Location'] = sensor['Location']
+    except:
+        logger.warning(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0].Location')
+        logger.debug(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0].Location, sensor is: {sensor}')
+        return
+    try:
+        message['message'] = sensor['Value']
+    except:
+        logger.warning(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].Value')
+        return
+    try:
+        message['Severity'] = sensor['PhysicalSubContext']
+    except:
+        logger.debug(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].PhysicalSubContext')
+    try:
+        message['Group'] = int(sensor['ParentalIndex'])
+    except:
+        logger.debug(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].ParentalIndex')
+    try:
+        message['Switch'] = int(sensor['Index'])
+    except:
+        logger.debug(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].Index')
+    try:
+        message['Port'] = int(sensor['SubIndex'])
+    except:
+        logger.debug(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].SubIndex')
+
+    if not config.kafka:
+        return
+    try:
+        topic = "crayfabrichealth"
+        producer.produce(topic=topic,
+                         value=serializer(message,
+                                          SerializationContext(topic, MessageField.VALUE)),
+                         on_delivery=delivery_report)
+    except KeyboardInterrupt:
+        pass
+    except ValueError:
+        logger.error("invalid input for kafka topic, discarding record")
 
 def worker_process(worker_queue, kafka_conf, schema_registry_conf):
     producer = None
@@ -492,6 +608,10 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                                            events_schema,
                                            to_dict=None,
                                            conf=avro_serializer_conf)
+        slingshot_health_serializer = AvroSerializer(schema_registry_client,
+                                                     slingshot_health_schema,
+                                                     to_dict=None,
+                                                     conf=avro_serializer_conf)
         producer = Producer(kafka_conf)
 
     while True:
@@ -529,6 +649,12 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         except:
             logger.error(f'Failed JSON decode of data from {client_ip}, data starts with: "{data_decoded[:40]}"')
             continue
+        if 'Events' not in json_data:
+            logger.warning(f'No "Events" in the message from {client_ip}, data starts with: "{data_decoded[:40]}"')
+            continue
+        if path != '/redfish' and path != '/slingshot':
+            logger.warning(f'Unrecognized path "{path}" for message from {client_ip}')
+            continue
 
         # process the the message
         if path == '/redfish':
@@ -540,7 +666,14 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
                     process_generic_redfish_event(ts, client_ip, event,
                                                   producer, events_serializer)
         elif path == '/slingshot':
-            pass
+            for event in json_data['Events']:
+                if event['MessageId'].startswith('CrayFabricHealth'):
+                    process_slingshot_health(ts, client_ip, event,
+                                             producer,
+                                             slingshot_health_serializer)
+                else:
+                    logger.debug(f'Unhandled slingshot message id {event["MessageId"]} from {client_ip}')
+
         if config.kafka:
             producer.poll(0.0)
 
@@ -579,7 +712,6 @@ def parse_configuration():
     parser.set_defaults(**defaults)
     parser.add_argument("-A", "--address")
     parser.add_argument("-P", "--port", type=int, default=8093)
-    parser.add_argument("-t", "--topic_prefix", default="timeseries-redfish-")
     parser.add_argument("-w", "--worker_count", type=int, default=16)
     parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
     parser.add_argument("--log_alerts", action='store_true', default=False)
