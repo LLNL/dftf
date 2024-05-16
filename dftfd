@@ -293,7 +293,10 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
 
     def do_GET(self):
         logger.warning(f'Invalid GET request, Path: {str(self.path)}, Headers:{str(self.headers)}')
-        self.send_response_only(405)
+        try:
+            self.send_response_only(405)
+        except:
+            pass
 
     def do_POST(self):
         client_ip = self.client_address[0]
@@ -304,10 +307,13 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         logger.debug(f'Assigning Worker-{idx} content POSTed to path {self.path} from {client_ip}, content length = {content_length}')
         self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
+        try:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
+        except Exception as inst:
+            logger.warn(f'Error while sening response to client {client_ip}: {inst}')
 
 def next_worker_index(worker_count):
     idx = 0
