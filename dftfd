@@ -210,6 +210,11 @@ slingshot_health_schema = """{
             "name": "PhysicalContext",
             "type": "string",
             "default": ""
+        },
+        {
+            "name": "cluster",
+            "type": "string",
+            "default": ""
         }
     ]
 }
@@ -584,6 +589,7 @@ def process_slingshot_health(ts, client_ip, event, producer, serializer):
         message['Port'] = int(sensor['SubIndex'])
     except:
         logger.debug(f'Message {message["MessageId"]} from {client_ip}/{message["Location"]} is missing .Oem.Sensors[0].SubIndex')
+    message['cluster'] = cluster_name
 
     if not config.kafka:
         return
