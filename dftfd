@@ -526,7 +526,7 @@ def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
         logger.log(DEBUG3, f"{event['timestamp']} {event['Location']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
 
     if config.kafka:
-        topic = "refish-crayevents"
+        topic = "redfish-crayevents"
         try:
             producer.produce(topic=topic,
                              value=serializer(event,
