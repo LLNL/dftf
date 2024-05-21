@@ -277,6 +277,11 @@ def update_one_server(server, subs=None):
         keep, remove, add = compare_subscriptions(subs, existing)
     except Exception as inst:
         logger.warning(f'Unexpected exception during compare_subscriptions for server {server}, {inst}')
+        try:
+            session.logout()
+        except:
+            pass
+        return
 
     for sub in keep:
         logger.debug(f'Server {server}, keeping sub Context={sub["Context"]}, Destination={sub["Destination"]}')
