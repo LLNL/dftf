@@ -493,8 +493,8 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
                              on_delivery=delivery_report)
         except KeyboardInterrupt:
             pass
-        except ValueError:
-            logger.error("invalid input for kafka topic, discarding record")
+        except Exception as inst:
+            logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
 process_cray_telemetry.last_accepted = defaultdict(int)
 
 def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
@@ -539,8 +539,8 @@ def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
                              on_delivery=delivery_report)
         except KeyboardInterrupt:
             pass
-        except ValueError:
-            logger.error("invalid input for kafka topic, discarding record")
+        except Exception as inst:
+            logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
 
 def process_slingshot_health(ts, client_ip, event, producer, serializer):
     message = {}
@@ -601,8 +601,8 @@ def process_slingshot_health(ts, client_ip, event, producer, serializer):
                          on_delivery=delivery_report)
     except KeyboardInterrupt:
         pass
-    except ValueError:
-        logger.error("invalid input for kafka topic, discarding record")
+    except Exception as inst:
+        logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
 
 def worker_process(worker_queue, kafka_conf, schema_registry_conf):
     producer = None
