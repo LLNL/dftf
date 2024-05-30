@@ -1,13 +1,17 @@
 Drink From The Firehose (DFTF) is a python program that subscribes to
 Redfish events on Cray/HPE hardware, and republishes them to topics
-in Kafka.
+in Kafka. Additionally, it handles Slingshot Telemetry messages with
+a MessageID prefix of CrayFabricHealth.
 
 DFTF will create subscriptions for two types of Redfish events:
 
 - CrayTelemetry Alerts
 - Normal (non-CrayTelemetry) Alerts
 
-CrayTelemtry alerts are sent at regular intervals (typically 5 seconds)
+Slingshot telemetry must be configured separately using slingshot
+CLI tools.
+
+CrayTelemetry alerts are sent at regular intervals (typically 5 seconds)
 decided upon by the Redfish server. The OEM field of the event contains
 a large amount of metric data formated in a nonstandard (OEM decided)
 Cray format. Typically the event message consolidates metric samples
