@@ -285,8 +285,10 @@ def find_and_purge_subscriptions(session,
     return found_contexts
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
-    def __init__(self, worker_queues, worker_mapping, sample_period,
+    def __init__(self, parent_queue, workers, worker_queues, worker_mapping, sample_period,
                  *args, **kwargs):
+        self.parent_queue = parent_queue
+        self.workers = workers
         self.worker_queues = worker_queues
         self.worker_mapping = worker_mapping
         self.sample_period = sample_period
@@ -310,7 +312,6 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
 
         idx = self.worker_mapping[client_ip]
         logger.debug(f'Assigning Worker-{idx} content POSTed to path {self.path} from {client_ip}, content length = {content_length}')
-        self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
 
         try:
             self.send_response(200)
@@ -320,27 +321,16 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
         except Exception as inst:
             logger.warn(f'Error while sening response to client {client_ip}: {inst}')
 
+        if self.workers[idx].is_alive():
+            self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
+        else:
+            self.parent_queue.put(idx)
+
 def next_worker_index(worker_count):
     idx = 0
     while True:
         yield idx
         idx = (idx + 1) % worker_count
-
-def run_http_server(worker_queues, ip_address, port):
-    server_address = (ip_address, int(port))
-    worker_mapping = defaultdict(next_worker_index(config.worker_count).__next__)
-    handler = functools.partial(Handle_HTTP_Connection,
-                                worker_queues,
-                                worker_mapping,
-                                config.sample_period)
-    httpd = ThreadingHTTPServer(server_address, handler)
-    logger.debug(f'Starting http server on port {port}')
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    logger.warning('Stopping http server')
-    httpd.server_close()
 
 def removeprefix(string_val, prefix):
     '''The string class has a removeprefix() method in 3.9+'''
@@ -760,6 +750,7 @@ def main():
     config, kafka_conf, schema_registry_conf = parse_configuration()
     logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.verbosity])
 
+    parent_queue = multiprocessing.Queue()
     worker_queues = []
     workers = []
     for i in range(config.worker_count):
@@ -773,7 +764,28 @@ def main():
         workers.append(worker)
         worker.start()
 
-    run_http_server(worker_queues, config.address, port=config.port)
+    server_address = (config.address, int(config.port))
+    worker_mapping = defaultdict(next_worker_index(config.worker_count).__next__)
+    handler = functools.partial(Handle_HTTP_Connection,
+                                parent_queue,
+                                workers,
+                                worker_queues,
+                                worker_mapping,
+                                config.sample_period)
+    httpd = ThreadingHTTPServer(server_address, handler)
+    logger.debug(f'Starting http server on port {int(config.port)}')
+    running = True
+    while running:
+        try:
+            httpd.handle_request()
+        except KeyboardInterrupt:
+            break
+        while not parent_queue.empty():
+            dead_worker_idx = parent_queue.get()
+            logger.error(f'Worker index {dead_worker_idx} is reported dead')
+            running = False
+    logger.warning('Stopping http server')
+    httpd.server_close()
 
     # Signal exit by putting "None" in the various queues
     for worker_queue in worker_queues:
