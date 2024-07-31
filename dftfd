@@ -780,10 +780,22 @@ def main():
             httpd.handle_request()
         except KeyboardInterrupt:
             break
-        while not parent_queue.empty():
+        if not parent_queue.empty():
             dead_worker_idx = parent_queue.get()
-            logger.error(f'Worker index {dead_worker_idx} is reported dead')
-            running = False
+            logger.error(f'Worker index {dead_worker_idx} is reported dead. Restarting.')
+            dead_queue = worker_queues[dead_worker_idx]
+            worker_queues[dead_worker_idx] = multiprocessing.Queue()
+            dead_worker = workers[dead_worker_idx]
+            new_worker = multiprocessing.Process(target=worker_process,
+                                                 name=f'Worker-{dead_worker_idx}',
+                                                 args=(worker_queues[dead_worker_idx],
+                                                       kafka_conf,
+                                                       schema_registry_conf))
+            new_worker.start()
+            workers[dead_worker_idx] = new_worker
+            dead_worker.join()
+            del dead_worker
+            del dead_queue
     logger.warning('Stopping http server')
     httpd.server_close()
 
