@@ -319,7 +319,7 @@ class Handle_HTTP_Connection(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write('<html><body><p>OK</p></body></html>'.encode('utf-8'))
         except Exception as inst:
-            logger.warn(f'Error while sening response to client {client_ip}: {inst}')
+            logger.warning(f'Error while sending HTTP response to client {client_ip}: {inst}')
 
         if self.workers[idx].is_alive():
             self.worker_queues[idx].put((self.path, self.headers, client_ip, post_data))
