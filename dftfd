@@ -463,6 +463,7 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
         last_ts = process_cray_telemetry.last_accepted[client_ip][sensor['SensorName']]
         delta = current_ts - last_ts
         if delta < config.sample_period:
+            logger.log(DEBUG3, f'skipping client_ip {client_ip}, sensor {sensor["SensorName"]}, last_ts {last_ts}, current_ts {current_ts}, sample_period {config.sample_period}')
             # The sample period for this sensor has not yet elapsed. Skip this data point.
             continue
         process_cray_telemetry.last_accepted[client_ip][sensor[sensor_name]] = current_ts
@@ -470,6 +471,7 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
         topic = "redfish-craytelemetry"
         if not config.kafka:
             continue
+        logger.log(DEBUG3, f'sending to kafka: client_ip {client_ip}, sensor {sensor["SensorName"]}')
         try:
             producer.produce(topic=topic,
                              value=serializer(sensor,
