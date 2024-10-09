@@ -454,8 +454,7 @@ def delivery_report(err, msg):
 
 
 def process_cray_telemetry(ts, client_ip, event, producer, serializer):
-    logger.debug(f'processing CrayTelemetry client_ip {client_ip} event {event["MessageId"]}, delta {delta:.2f}s')
-
+    logger.debug(f'processing CrayTelemetry client_ip {client_ip} event {event["MessageId"]}')
     # Look through all sensors, only keep the ones for which the sampling period
     # has elapsed.
     for sensor_name, sensor in get_sensors_cray_telemetry(event):
