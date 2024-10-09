@@ -452,40 +452,35 @@ def delivery_report(err, msg):
         return
     logger.log(DEBUG3, f'record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
 
-def process_cray_telemetry(ts, client_ip, event, producer, serializer):
-    # Filter out CrayTelemetry if config.sample_period has not expired
-    event_id = (client_ip, event['MessageId'])
-    delta = ts - process_cray_telemetry.last_accepted[event_id]
-    if delta < config.sample_period:
-        # Discard the CrayTelemtry events
-        logger.debug(f'skipping CrayTelemetry event {event_id}, delta {delta:.2f}s')
-        return
-    process_cray_telemetry.last_accepted[event_id] = ts
 
+def process_cray_telemetry(ts, client_ip, event, producer, serializer):
     logger.debug(f'processing CrayTelemetry event {event_id}, delta {delta:.2f}s')
 
-    metrics_dict = {}
-    # look through all sensors, and only keep the most
-    # recent values for each unique sensor
+    # Look through all sensors, only keep the ones for which the sampling period
+    # has elapsed.
     for sensor_name, sensor in get_sensors_cray_telemetry(event):
-        if sensor_name not in metrics_dict:
-            metrics_dict[sensor_name] = sensor
-        elif metrics_dict[sensor_name]['timestamp'] < sensor['timestamp']:
-            metrics_dict[sensor_name] = sensor
-    topic = "redfish-craytelemetry"
-    for metric in metrics_dict.values():
+        current_ts = sensor['timestamp']
+        last_ts = process_cray_telemetry.last_accepted[client_ip][sensor['SensorName']]
+        delta = current_ts - last_ts
+        if delta < config.sample_period:
+            # The sample period for this sensor has not yet elapsed. Skip this data point.
+            continue
+        process_cray_telemetry.last_accepted[client_ip][sensor[sensor_name]] = current_ts
+
+        topic = "redfish-craytelemetry"
         if not config.kafka:
             continue
         try:
             producer.produce(topic=topic,
-                             value=serializer(metric,
+                             value=serializer(sensor,
                                               SerializationContext(topic, MessageField.VALUE)),
                              on_delivery=delivery_report)
         except KeyboardInterrupt:
             pass
         except Exception as inst:
             logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
-process_cray_telemetry.last_accepted = defaultdict(int)
+# The first key is client_ip, the second key is the sansor_name.
+process_cray_telemetry.last_accepted = defaultdict(lambda: defaultdict(int))
 
 def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
     logger.debug(f'processing generic redfish event {client_ip}')
