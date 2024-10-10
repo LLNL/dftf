@@ -470,7 +470,7 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
         topic = "redfish-craytelemetry"
         if not config.kafka:
             continue
-        logger.log(DEBUG3, f'sending CrayTelemtry to kafka client_ip {client_ip}, sensor {sensor_name}')
+        logger.log(DEBUG3, f'sending CrayTelemtry client_ip {client_ip}, sensor {sensor_name}, last_ts {last_ts}, current_ts {current_ts}, sample_period {config.sample_period}')
         try:
             producer.produce(topic=topic,
                              value=serializer(sensor,
