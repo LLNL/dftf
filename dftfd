@@ -8,6 +8,7 @@
 import argparse
 from collections import defaultdict
 import configparser
+from dataclasses import dataclass, InitVar
 import dateutil
 import dateutil.parser
 import functools
@@ -24,6 +25,7 @@ import random
 import subprocess
 import sys
 import time
+from typing import Optional
 import queue
 from confluent_kafka import Producer
 from confluent_kafka.serialization import StringSerializer, SerializationContext, MessageField
@@ -219,6 +221,27 @@ slingshot_health_schema = """{
     ]
 }
 """
+
+class keydefaultdict(defaultdict):
+    def __missing__(self, key):
+        if self.default_factory is None:
+            raise KeyError(key)
+        else:
+            ret = self[key] = self.default_factory(key)
+            return ret
+
+def pick_sample_period_ms(sensor_name):
+    return 300*1000
+
+@dataclass
+class SensorCache:
+    sensor_name: InitVar[Optional[str]] = None
+    last_kept_ms: int = 0
+    sample_period_ms: Optional[int] = None
+
+    def __post_init__(self, sensor_name):
+        if self.sample_period_ms is None and sensor_name is not None:
+            self.sample_period_ms = pick_sample_period_ms(sensor_name)
 
 def get_name(hostname_or_ip):
     if hostname_or_ip not in get_name.cache:
@@ -457,20 +480,20 @@ def process_cray_telemetry(client_ip, event, producer, serializer):
     # Look through all sensors, only keep the ones for which the sampling period
     # has elapsed.
     for sensor_name, sensor in get_sensors_cray_telemetry(event):
+        cache = process_cray_telemetry.sensor_cache[client_ip][sensor_name]
+        last_ms = cache.last_kept_ms
         current_ms = sensor['timestamp']
-        last_ms = process_cray_telemetry.last_accepted[client_ip][sensor_name]
         delta = current_ms - last_ms
-        sample_period_ms = config.sample_period * 1000
-        if delta < sample_period_ms:
-            logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {sample_period_ms}')
+        if delta < cache.sample_period_ms:
+            logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {cache.sample_period_ms}')
             # The sample period for this sensor has not yet elapsed. Skip this data point.
             continue
-        process_cray_telemetry.last_accepted[client_ip][sensor_name] = current_ms
+        cache.last_kept_ms = current_ms
 
         topic = "redfish-craytelemetry"
         if not config.kafka:
             continue
-        logger.log(DEBUG3, f'sending CrayTelemtry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {sample_period_ms}')
+        logger.log(DEBUG3, f'sending CrayTelemtry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {cache.sample_period_ms}')
         try:
             producer.produce(topic=topic,
                              value=serializer(sensor,
@@ -481,7 +504,8 @@ def process_cray_telemetry(client_ip, event, producer, serializer):
         except Exception as inst:
             logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
 # The first key is client_ip, the second key is the sansor_name.
-process_cray_telemetry.last_accepted = defaultdict(lambda: defaultdict(int))
+# The value is a SensorCache dataclass.
+process_cray_telemetry.sensor_cache = defaultdict(lambda: keydefaultdict(SensorCache))
 
 def process_generic_redfish_event(client_ip, event, producer, serializer):
     logger.debug(f'processing generic redfish event {client_ip}')
