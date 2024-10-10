@@ -285,13 +285,12 @@ def find_and_purge_subscriptions(session,
     return found_contexts
 
 class Handle_HTTP_Connection(BaseHTTPRequestHandler):
-    def __init__(self, parent_queue, workers, worker_queues, worker_mapping, sample_period,
+    def __init__(self, parent_queue, workers, worker_queues, worker_mapping,
                  *args, **kwargs):
         self.parent_queue = parent_queue
         self.workers = workers
         self.worker_queues = worker_queues
         self.worker_mapping = worker_mapping
-        self.sample_period = sample_period
         super().__init__(*args, **kwargs)
 
     def log_request(self, code='-', size='-'):
@@ -766,8 +765,7 @@ def main():
                                 parent_queue,
                                 workers,
                                 worker_queues,
-                                worker_mapping,
-                                config.sample_period)
+                                worker_mapping)
     httpd = ThreadingHTTPServer(server_address, handler)
     logger.debug(f'Starting http server on port {int(config.port)}')
     running = True
