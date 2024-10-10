@@ -453,24 +453,25 @@ def delivery_report(err, msg):
     logger.log(DEBUG3, f'record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
 
 
-def process_cray_telemetry(ts, client_ip, event, producer, serializer):
+def process_cray_telemetry(client_ip, event, producer, serializer):
     logger.debug(f'processing CrayTelemetry client_ip {client_ip} event {event["MessageId"]}')
     # Look through all sensors, only keep the ones for which the sampling period
     # has elapsed.
     for sensor_name, sensor in get_sensors_cray_telemetry(event):
-        current_ts = sensor['timestamp']
-        last_ts = process_cray_telemetry.last_accepted[client_ip][sensor_name]
-        delta = current_ts - last_ts
-        if delta < config.sample_period:
-            logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ts {last_ts}, current_ts {current_ts}, sample_period {config.sample_period}')
+        current_ms = sensor['timestamp']
+        last_ms = process_cray_telemetry.last_accepted[client_ip][sensor_name]
+        delta = current_ms - last_ms
+        sample_period_ms = config.sample_period * 1000
+        if delta < sample_period_ms:
+            logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {sample_period_ms}')
             # The sample period for this sensor has not yet elapsed. Skip this data point.
             continue
-        process_cray_telemetry.last_accepted[client_ip][sensor_name] = current_ts
+        process_cray_telemetry.last_accepted[client_ip][sensor_name] = current_ms
 
         topic = "redfish-craytelemetry"
         if not config.kafka:
             continue
-        logger.log(DEBUG3, f'sending CrayTelemtry client_ip {client_ip}, sensor {sensor_name}, last_ts {last_ts}, current_ts {current_ts}, sample_period {config.sample_period}')
+        logger.log(DEBUG3, f'sending CrayTelemtry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {sample_period_ms}')
         try:
             producer.produce(topic=topic,
                              value=serializer(sensor,
@@ -483,7 +484,7 @@ def process_cray_telemetry(ts, client_ip, event, producer, serializer):
 # The first key is client_ip, the second key is the sansor_name.
 process_cray_telemetry.last_accepted = defaultdict(lambda: defaultdict(int))
 
-def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
+def process_generic_redfish_event(client_ip, event, producer, serializer):
     logger.debug(f'processing generic redfish event {client_ip}')
     # client_ip is the IP address as a string
     client_hostname = get_name(client_ip)
@@ -528,7 +529,7 @@ def process_generic_redfish_event(ts, client_ip, event, producer, serializer):
         except Exception as inst:
             logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
 
-def process_slingshot_health(ts, client_ip, event, producer, serializer):
+def process_slingshot_health(client_ip, event, producer, serializer):
     message = {}
     try:
         message['timestamp'] = parse_timestamp(event['EventTimestamp'], client_ip)
@@ -631,7 +632,6 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
             break
 
         # decode the message
-        ts = time.time()
         try:
             (path, headers, client_ip, data) = work
         except:
@@ -658,15 +658,15 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         if path == '/redfish':
             for event in json_data['Events']:
                 if event['MessageId'].startswith('CrayTelemetry'):
-                    process_cray_telemetry(ts, client_ip, event,
+                    process_cray_telemetry(client_ip, event,
                                            producer, metrics_serializer)
                 else:
-                    process_generic_redfish_event(ts, client_ip, event,
+                    process_generic_redfish_event(client_ip, event,
                                                   producer, events_serializer)
         elif path == '/slingshot':
             for event in json_data['Events']:
                 if event['MessageId'].startswith('CrayFabricHealth'):
-                    process_slingshot_health(ts, client_ip, event,
+                    process_slingshot_health(client_ip, event,
                                              producer,
                                              slingshot_health_serializer)
                 else:
