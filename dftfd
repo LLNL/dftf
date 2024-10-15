@@ -576,7 +576,6 @@ def process_slingshot_health(client_ip, event, producer, serializer):
         sensor = event['Oem']['Sensors'][0]
     except:
         logger.warning(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0]: {event}')
-        logger.debug(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0], event is: {event}')
         return
     if len(event['Oem']['Sensors']) > 1:
         # if ever true, will need to change the code to loop over the Sensor array
@@ -585,7 +584,6 @@ def process_slingshot_health(client_ip, event, producer, serializer):
         message['Location'] = sensor['Location']
     except:
         logger.warning(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0].Location')
-        logger.debug(f'Message {message["MessageId"]} from {client_ip} is missing .Oem.Sensors[0].Location, sensor is: {sensor}')
         return
     try:
         message['message'] = sensor['Value']
