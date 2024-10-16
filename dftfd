@@ -8,6 +8,7 @@
 import argparse
 from collections import defaultdict
 import configparser
+import dataclasses
 from dataclasses import dataclass, InitVar
 import dateutil
 import dateutil.parser
@@ -20,18 +21,19 @@ from math import ceil, floor
 import multiprocessing
 import os
 import platform
-import pprint
 import random
+import re
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Optional, Pattern
 import queue
 from confluent_kafka import Producer
 from confluent_kafka.serialization import StringSerializer, SerializationContext, MessageField
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.schema_registry import record_subject_name_strategy
+import yaml
 
 CLOCK_SKEW_LIMIT_SEC=3600
 
@@ -50,7 +52,27 @@ verbosity_levels = {
     'debug3': DEBUG3
 }
 
-config = None
+@dataclass
+class SampleField:
+    name: str
+    pattern: Pattern[str]
+
+@dataclass
+class SamplePeriod:
+    fields: Optional[list[SampleField]] = None
+    period_ms: Optional[int] = None
+
+@dataclass
+class Config:
+    listen_port: int = 8095
+    listen_address: str = ''
+    worker_count: int = 16
+    log_level: str = 'warning'
+    kafka: Optional[dict] = None
+    schema_registry: Optional[dict] = None
+    sample_periods: list[SamplePeriod] = dataclasses.field(default_factory=list)
+config = Config()
+
 logger = None
 hostname = platform.node()
 cluster_name = hostname.rstrip('0123456789')
@@ -222,26 +244,34 @@ slingshot_health_schema = """{
 }
 """
 
-class keydefaultdict(defaultdict):
-    def __missing__(self, key):
-        if self.default_factory is None:
-            raise KeyError(key)
-        else:
-            ret = self[key] = self.default_factory(key)
-            return ret
-
-def pick_sample_period_ms(sensor_name):
-    return 300*1000
-
 @dataclass
 class SensorCache:
-    sensor_name: InitVar[Optional[str]] = None
+    sensor: InitVar[dict]
     last_kept_ms: int = 0
     sample_period_ms: Optional[int] = None
 
-    def __post_init__(self, sensor_name):
-        if self.sample_period_ms is None and sensor_name is not None:
-            self.sample_period_ms = pick_sample_period_ms(sensor_name)
+    def __post_init__(self, sensor):
+        for i, period in enumerate(config.sample_periods, start=1):
+            if period.fields is None:
+                self.sample_period_ms = period.period_ms
+                logger.log(DEBUG2, f'SensorCache() sensor "{sensor["SensorName"]}" matched sample_period group {i}, sample_period_ms = {self.sample_period_ms}')
+                return
+            # All of the patterns int the "fields" list must match for the
+            # period to be a match.
+            matched = True
+            for field in period.fields:
+                if field.name not in sensor:
+                    logger.warning(f'sensor "{sensor["SensorName"]}" is missing configuration field name "{field.name}"')
+                    return
+                if not field.pattern.fullmatch(sensor[field.name]):
+                    matched = False
+                    break
+            if matched is True:
+                self.sample_period_ms = period.period_ms
+                logger.log(DEBUG2, f'SensorCache() sensor "{sensor["SensorName"]}", matched sample_period group {i}, sample_period_ms = {self.sample_period_ms}')
+                return
+        logger.log(DEBUG2, f'SensorCache() sensor "{sensor["SensorName"]}" matched no sample_period: skipping collection')
+        return
 
 def get_name(hostname_or_ip):
     if hostname_or_ip not in get_name.cache:
@@ -489,10 +519,15 @@ def process_cray_telemetry(client_ip, event, producer, serializer):
     # Look through all sensors, only keep the ones for which the sampling period
     # has elapsed.
     for sensor_name, sensor in get_sensors_cray_telemetry(event):
+        if (sensor_name not in process_cray_telemetry.sensor_cache[client_ip]):
+            process_cray_telemetry.sensor_cache[client_ip][sensor_name] = SensorCache(sensor)
         cache = process_cray_telemetry.sensor_cache[client_ip][sensor_name]
         last_ms = cache.last_kept_ms
         current_ms = sensor['timestamp']
         delta = current_ms - last_ms
+        if not cache.sample_period_ms:
+            logger.log(DEBUG3, f'perma-skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}')
+            continue
         if delta < cache.sample_period_ms:
             logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {cache.sample_period_ms}')
             # The sample period for this sensor has not yet elapsed. Skip this data point.
@@ -512,9 +547,9 @@ def process_cray_telemetry(client_ip, event, producer, serializer):
             pass
         except Exception as inst:
             logger.error("produce() failed on kafka topic \"{topic}\", discarding record: {inst}")
-# The first key is client_ip, the second key is the sansor_name.
-# The value is a SensorCache dataclass.
-process_cray_telemetry.sensor_cache = defaultdict(lambda: keydefaultdict(SensorCache))
+# The first key is client_ip, the second key is the sensor_name.
+# The values are a SensorCache dataclass.
+process_cray_telemetry.sensor_cache = defaultdict(lambda: defaultdict())
 
 def process_generic_redfish_event(client_ip, event, producer, serializer):
     logger.debug(f'processing generic redfish event {client_ip}')
@@ -705,76 +740,125 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         if config.kafka:
             producer.poll(0.0)
 
+def process_config(from_yaml):
+    global config
+
+    known_top_level_keys = [
+        'listen_port',
+        'listen_address',
+        'worker_count',
+        'log_level',
+        'kafka',
+        'schema_registry',
+        'sample_periods'
+        ]
+    for key in from_yaml.keys():
+        if key not in known_top_level_keys:
+            logger.warning(f'Unrecognized key in configuration file: {key}')
+
+    try:
+        config.log_level = from_yaml['log_level']
+    except:
+        pass
+    try:
+        config.listen_port = from_yaml['listen_port']
+    except:
+        pass
+    try:
+        config.listen_address = from_yaml['listen_address']
+    except:
+        pass
+    try:
+        config.worker_count = from_yaml['worker_count']
+    except:
+        pass
+    try:
+        config.kafka = from_yaml['kafka']
+    except:
+        pass
+    try:
+        config.schema_registry = from_yaml['schema_registry']
+    except:
+        pass
+    if 'sample_periods' not in from_yaml:
+        logger.error('"sampler_periods" is a required configuration file section.')
+        sys.exit(1)
+    for period in from_yaml['sample_periods']:
+        for key in period.keys():
+            if key != 'fields' and key != 'period':
+                logger.warning('Invalid key in configuration file: {key}')
+                sys.exit(1)
+        if 'fields' not in period:
+            logger.error('Each mapping in the "sample_periods" list must have a "fields" key')
+            sys.exit(1)
+        if 'period' not in period:
+            logger.error('Each mapping in the "sample_periods" list must have a "period" key')
+            sys.exit(1)
+
+        new_period = SamplePeriod()
+        config.sample_periods.append(new_period)
+        if period['period'] is not None:
+            new_period.period_ms = period['period'] * 1000
+        if period['fields']:
+            new_fields = []
+            new_period.fields = new_fields
+            for field in period['fields']:
+                for key in field.keys():
+                    if key != 'name' and key != 'pattern':
+                        logger.warning('Invalid key in configuration file: {key}')
+                        sys.exit(1)
+                if 'name' not in field:
+                    logger.error('Each mapping in the "fields" list must have a "name" key')
+                    sys.exit(1)
+                if 'pattern' not in field:
+                    logger.error('Each mapping in the "fields" list must have a "pattern" key')
+                    sys.exit(1)
+                try:
+                    pattern = re.compile(field['pattern'])
+                except:
+                    logger.error(f'''Failed to compile regular expression: "{field['pattern']}"''')
+                    raise
+                new_field = SampleField(name=field['name'], pattern=pattern)
+                new_fields.append(new_field)
+
 def parse_configuration():
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument("-c", "--conf_file",
-                               help="configuration file",
-                               metavar="FILE")
-    args, argv = parent_parser.parse_known_args()
+    global config
 
-    defaults = {}
-    file_argv = []
-    hosts = []
-    kafka_conf = {}
-    schema_registry_conf = {}
-    if args.conf_file:
-        cp = configparser.ConfigParser(allow_no_value=True)
-        cp.read(args.conf_file)
-        for key, value in cp.items("general"):
-            file_argv.append('--'+key)
-            if value:
-                file_argv.append(value)
-        argv = file_argv + argv
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config",
+                        help="configuration file",
+                        metavar="FILE",
+                        default="/etc/dftfd.yaml")
+    parser.add_argument("-v", "--verbosity",
+                        choices=verbosity_levels.keys(),
+                        default='warning')
+    args = parser.parse_args()
 
-        if "kafka" in cp:
-            kafka_conf = dict(cp.items("kafka"))
-        if "schema_registry" in cp:
-            schema_registry_conf = dict(cp.items("schema_registry"))
+    config.log_level = args.verbosity
 
-        if hostname in cp:
-            defaults['hosts'] = list(cp[hostname].keys())
-        else:
-            defaults['hosts'] = []
+    try:
+        with open(args.config, 'r') as cf:
+            from_yaml = yaml.safe_load(cf)
+            process_config(from_yaml)
+    except Exception as inst:
+        logger.error(f'Unable to read config file {args.config}: {inst}')
+        sys.exit(1)
 
-    parser = argparse.ArgumentParser(parents=[parent_parser])
-    parser.set_defaults(**defaults)
-    parser.add_argument("-A", "--address")
-    parser.add_argument("-P", "--port", type=int, default=8093)
-    parser.add_argument("-w", "--worker_count", type=int, default=16)
-    parser.add_argument("-v", "--verbosity", choices=verbosity_levels.keys(), default='warning')
-    parser.add_argument("--log_alerts", action='store_true', default=False)
-    parser.add_argument("--log_alerts_file", type=str)
-    parser.add_argument("--no_kafka", dest='kafka', action='store_false', default=True)
-    parser.add_argument("--sample_period", type=int, default=0)
-
-    args = parser.parse_args(argv)
-
-    args_dict = vars(args)
-
-    # Lookup the ip_address of this node on the "switch" VLAN
-    if not args.address:
-        shasta_name = hostname+'-shasta'
+    # Lookup listen_address was supplied, and it was not an ip address, look up the IP address
+    if config.listen_address and not re.fullmatch('\d+\.\d+\.\d+\.\d+', config.listen_address):
         try:
-            args.address = getent_hosts(shasta_name)[0]
+            config.listen_address = getent_hosts(config.listen_address)[0]
         except:
-            args.address = shasta_name
-
-    if args.log_alerts_file:
-        global log_alerts_file
-        try:
-            log_alerts_file = open(args.log_alerts_file, "a")
-        except:
-            print(f'Unable to open file "{args.log_alerts_file}"')
-            raise
-
-    return args, kafka_conf, schema_registry_conf
+            logger.error(f'Failed to look up IP of listen_address "{config.listen_address}" using "getent hosts"')
+            sys.exit(1)
 
 def main():
     global logger
     global config
 
-    config, kafka_conf, schema_registry_conf = parse_configuration()
-    logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.verbosity])
+    logger = logging.getLogger(__name__)
+    parse_configuration()
+    logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.log_level])
 
     parent_queue = multiprocessing.Queue()
     worker_queues = []
@@ -785,12 +869,12 @@ def main():
         worker = multiprocessing.Process(target=worker_process,
                                          name=f'Worker-{i}',
                                          args=(worker_queue,
-                                               kafka_conf,
-                                               schema_registry_conf))
+                                               config.kafka,
+                                               config.schema_registry))
         workers.append(worker)
         worker.start()
 
-    server_address = (config.address, int(config.port))
+    server_address = (config.listen_address, config.listen_port)
     worker_mapping = defaultdict(next_worker_index(config.worker_count).__next__)
     handler = functools.partial(Handle_HTTP_Connection,
                                 parent_queue,
@@ -798,7 +882,7 @@ def main():
                                 worker_queues,
                                 worker_mapping)
     httpd = ThreadingHTTPServer(server_address, handler)
-    logger.debug(f'Starting http server on port {int(config.port)}')
+    logger.debug(f'Starting http server on {config.listen_address}:{config.listen_port}')
     running = True
     while running:
         try:
@@ -814,8 +898,8 @@ def main():
             new_worker = multiprocessing.Process(target=worker_process,
                                                  name=f'Worker-{dead_worker_idx}',
                                                  args=(worker_queues[dead_worker_idx],
-                                                       kafka_conf,
-                                                       schema_registry_conf))
+                                                       config.kafka,
+                                                       config.schema_registry))
             new_worker.start()
             workers[dead_worker_idx] = new_worker
             dead_worker.join()
