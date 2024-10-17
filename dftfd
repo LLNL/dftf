@@ -75,7 +75,6 @@ config = Config()
 logger = None
 hostname = platform.node()
 cluster_name = hostname.rstrip('0123456789')
-log_alerts_file = None
 
 metrics_schema = """{
     "name": "RedfishCrayOemSensors",
@@ -575,13 +574,7 @@ def process_generic_redfish_event(client_ip, event, producer, serializer):
         event['OriginOfCondition'] = ''
     else:
         event['OriginOfCondition'] = event['OriginOfCondition']['@odata.id']
-    if log_alerts_file:
-        log_alerts_file.write(f"{timestamp} {event['Location']} {event['MessageId']} {event['Severity']} \"{event['Message']}\" {event['OriginOfCondition']}\n")
-        log_alerts_file.flush()
-    if config.log_alerts:
-        logger.log(logging.INFO, f"{timestamp} {event['Location']} {event['MessageId']} {event['Severity']} \"{event['Message']}\" {event['OriginOfCondition']}")
-    else:
-        logger.log(DEBUG3, f"{event['timestamp']} {event['Location']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
+    logger.log(DEBUG3, f"{event['timestamp']} {event['Location']} {event['MessageId']} {event['Severity']} {event['Message']} {event['OriginOfCondition']}")
 
     if config.kafka:
         topic = "redfish-crayevents"
