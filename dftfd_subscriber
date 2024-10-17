@@ -5,7 +5,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import argparse
 from collections import defaultdict
+from dataclasses import dataclass, InitVar
 import hostlist
 import itertools
 import logging
@@ -16,17 +18,38 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Optional
 import yaml
 
 signal_caught = None
 logger = None
 
+@dataclass
 class Config:
-    refresh_interval = 3600
-    context_prefix = ''
-    purge_unrecognized = False
-    max_workers = 400
-    log_level = 'warning'
+    config_file: str = '/etc/dftfd_subscriber.yaml'
+    refresh_interval: int = 3600
+    context_prefix: str = ''
+    purge_unrecognized: bool = False
+    max_workers: int = 400
+    log_level: str = 'warning'
+    redfish_username: Optional[str] = None
+    redfish_password: Optional[str] = None
+config = Config()
+
+DEBUG2=logging.DEBUG-1
+DEBUG3=logging.DEBUG-2
+logging.addLevelName(DEBUG2, 'DEBUG2')
+logging.addLevelName(DEBUG3, 'DEBUG3')
+
+verbosity_levels = {
+    'critical': logging.CRITICAL,
+    'error': logging.ERROR,
+    'warning': logging.WARNING,
+    'info': logging.INFO,
+    'debug': logging.DEBUG,
+    'debug2': DEBUG2,
+    'debug3': DEBUG3
+}
 
 def interrupt_handler(signum, frame):
     global signal_caught
@@ -48,53 +71,44 @@ def getent_hosts(hostname_or_ip):
         return ['FIXME_'+hostname_or_ip]
     return hosts
 
-def set_log_level():
-    numeric_level = getattr(logging, Config.log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f'Invalid log level: {Config.log_level}')
-    logger.setLevel(numeric_level)
-
-def parse_config(cf):
+def process_config_yaml(from_yaml):
     subs = defaultdict(list)
 
-    config = yaml.safe_load(cf)
     try:
-        Config.log_level = config['log_level']
-    except:
-        pass
-    else:
-        set_log_level()
-    try:
-        Config.refresh_interval = config['refresh_interval']
+        config.log_level = from_yaml['log_level']
     except:
         pass
     try:
-        Config.context_prefix = config['context_prefix']
+        config.refresh_interval = from_yaml['refresh_interval']
     except:
         pass
     try:
-        Config.purge_unrecognized = config['purge_unrecognized']
+        config.context_prefix = from_yaml['context_prefix']
     except:
         pass
     try:
-        Config.max_workers = config['max_workers']
+        config.purge_unrecognized = from_yaml['purge_unrecognized']
     except:
         pass
     try:
-        Config.redfish_username = config['redfish_username']
+        config.max_workers = from_yaml['max_workers']
+    except:
+        pass
+    try:
+        config.redfish_username = from_yaml['redfish_username']
     except:
         raise Exception(f'Missing "redfish_username" field')
     try:
-        Config.redfish_password = config['redfish_password']
+        config.redfish_password = from_yaml['redfish_password']
     except:
         raise Exception(f'Missing "redfish_password" field')
 
-    for subscription in config['subscriptions']:
+    for subscription in from_yaml['subscriptions']:
         try:
             val = subscription['servers']
         except:
             try:
-                val = config['servers']
+                val = from_yaml['servers']
             except:
                 raise Exception(f'Missing "servers" field')
         # 'servers' can be a string or list of strings
@@ -109,21 +123,21 @@ def parse_config(cf):
             destinations = subscription['destinations']
         except:
             try:
-                destinations = config['destinations']
+                destinations = from_yaml['destinations']
             except:
                 raise Exception(f'Missing "destinations" field')
         try:
             destinations_port = subscription['destinations_port']
         except:
             try:
-                destinations_port = config['destinations_port']
+                destinations_port = from_yaml['destinations_port']
             except:
                 raise Exception(f'Missing "destinations_port" field')
         try:
             destinations_use_ip = subscription['destinations_use_ip']
         except:
             try:
-                destinations_use_ip = config['destinations_use_ip']
+                destinations_use_ip = from_yaml['destinations_use_ip']
             except:
                 destinations_use_ip = False
 
@@ -137,10 +151,10 @@ def parse_config(cf):
                 sub = dict(subscription['properties'])
             except:
                 sub = dict()
-            sub['Destination'] = destination+':'+str(config['destinations_port'])+'/redfish'
+            sub['Destination'] = destination+':'+str(from_yaml['destinations_port'])+'/redfish'
             if 'Context' not in sub:
                 try:
-                    sub['Context'] = Config.context_prefix + subscription['context']
+                    sub['Context'] = config.context_prefix + subscription['context']
                 except:
                     raise Exception(f'missing "context" or "Context" in config')
             if 'Protocol' not in sub:
@@ -148,15 +162,6 @@ def parse_config(cf):
             subs[server].append(sub)
 
     return subs
-
-def read_config_file(config_file):
-    subs_map = None
-    try:
-        with open(config_file, 'r') as cf:
-            subs_map = parse_config(cf)
-    except Exception as inst:
-        logger.error(f'Unable to read config file {config_file}, {inst}')
-    return subs_map
 
 def field_match(field, requested, existing):
     if field in requested and field in existing:
@@ -229,8 +234,8 @@ def compare_subscriptions(requested_subs, existing_subs):
         if not found:
             add.append(requested)
     for sub in existing_subs:
-        if (Config.context_prefix and sub['Context'][:len(Config.context_prefix)] == Config.context_prefix) \
-           or Config.purge_unrecognized:
+        if (config.context_prefix and sub['Context'][:len(config.context_prefix)] == config.context_prefix) \
+           or config.purge_unrecognized:
             remove.append(sub)
         else:
             keep.append(sub)
@@ -254,8 +259,8 @@ def update_one_server(server, subs=None):
         subs = []
     try:
         session = redfish.redfish_client(base_url="https://"+server,
-                                         username=Config.redfish_username,
-                                         password=Config.redfish_password,
+                                         username=config.redfish_username,
+                                         password=config.redfish_password,
                                          default_prefix="/redfish/v1",
                                          timeout=10,
                                          max_retry=1)
@@ -305,26 +310,56 @@ def update_one_server(server, subs=None):
 
 def update_all_servers(subs_map):
     logger.info('Subscription update cycle beginning')
-    num_pool_processes = min(Config.max_workers, len(subs_map))
+    num_pool_processes = min(config.max_workers, len(subs_map))
     with multiprocessing.Pool(num_pool_processes) as pool:
         result = pool.starmap(update_one_server, subs_map.items())
     logger.info('Subscription update cycle finished')
 
 def purge_all_servers(subs_map):
     logger.warning('Subscription purge cycle beginning')
-    num_pool_processes = min(Config.max_workers, len(subs_map))
+    num_pool_processes = min(config.max_workers, len(subs_map))
     with multiprocessing.Pool(num_pool_processes) as pool:
         result = pool.map(update_one_server, subs_map.keys())
     logger.warning('Subscription purge cycle finished')
+
+def read_config_file():
+    subs_map = None
+    try:
+        with open(config.config_file, 'r') as cf:
+            from_yaml = yaml.safe_load(cf)
+            subs_map = process_config_yaml(from_yaml)
+    except Exception as inst:
+        logger.error(f'Unable to read config file {config.config_file}, {inst}')
+        sys.exit(1)
+    return subs_map
+
+def initialize_configuration():
+    global config
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config",
+                        help="configuration file",
+                        metavar="FILE",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-v", "--verbosity",
+                        choices=verbosity_levels.keys(),
+                        default=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if 'config' in args:
+        config.config_file = args.config
+    subs_map = read_config_file()
+    if  'verbosity' in args:
+        config.log_level = args.verbosity
+
+    return subs_map
 
 def main():
     global signal_caught
     global logger
 
-    logger = multiprocessing.log_to_stderr()
-    set_log_level()
-
-    subs_map = read_config_file(sys.argv[1])
+    logger = logging.getLogger(__name__)
+    subs_map = initialize_configuration()
+    logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.log_level])
 
     last_update = 0
     while True:
@@ -336,7 +371,7 @@ def main():
                or sig == signal.SIGUSR1:
                 last_update = time.time()
                 logger.info(f'Got signal {sig}')
-                subs_map = read_config_file(sys.argv[1])
+                subs_map = read_config_file()
                 update_all_servers(subs_map)
             elif sig == signal.SIGUSR2:
                 logger.info(f'Got signal {sig}')
@@ -346,7 +381,7 @@ def main():
                 raise Exception(f'unexpected signal {sig}')
         else:
             now = time.time()
-            if (now - last_update) > Config.refresh_interval:
+            if (now - last_update) > config.refresh_interval:
                 last_update = now
                 update_all_servers(subs_map)
             pass

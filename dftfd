@@ -7,7 +7,6 @@
 
 import argparse
 from collections import defaultdict
-import configparser
 import dataclasses
 from dataclasses import dataclass, InitVar
 import dateutil
@@ -17,7 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import itertools
 import json
 import logging
-from math import ceil, floor
 import multiprocessing
 import os
 import platform
@@ -64,6 +62,7 @@ class SamplePeriod:
 
 @dataclass
 class Config:
+    config_file: str = '/etc/dftfd.yaml'
     listen_port: int = 8095
     listen_address: str = ''
     worker_count: int = 16
@@ -740,7 +739,7 @@ def worker_process(worker_queue, kafka_conf, schema_registry_conf):
         if config.kafka:
             producer.poll(0.0)
 
-def process_config(from_yaml):
+def process_config_yaml(from_yaml):
     global config
 
     known_top_level_keys = [
@@ -821,28 +820,29 @@ def process_config(from_yaml):
                 new_field = SampleField(name=field['name'], pattern=pattern)
                 new_fields.append(new_field)
 
-def parse_configuration():
+def initialize_configuration():
     global config
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config",
                         help="configuration file",
                         metavar="FILE",
-                        default="/etc/dftfd.yaml")
+                        default=argparse.SUPPRESS)
     parser.add_argument("-v", "--verbosity",
                         choices=verbosity_levels.keys(),
-                        default='warning')
+                        default=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    config.log_level = args.verbosity
-
+    if 'config' in args:
+        config.config_file = args.config
     try:
         with open(args.config, 'r') as cf:
             from_yaml = yaml.safe_load(cf)
-            process_config(from_yaml)
+            process_config_yaml(from_yaml)
     except Exception as inst:
         logger.error(f'Unable to read config file {args.config}: {inst}')
         sys.exit(1)
+    if 'verbosity' in args:
+        config.log_level = args.verbosity
 
     # Lookup listen_address was supplied, and it was not an ip address, look up the IP address
     if config.listen_address and not re.fullmatch('\d+\.\d+\.\d+\.\d+', config.listen_address):
@@ -857,7 +857,7 @@ def main():
     global config
 
     logger = logging.getLogger(__name__)
-    parse_configuration()
+    initialize_configuration()
     logger = multiprocessing.log_to_stderr(level=verbosity_levels[config.log_level])
 
     parent_queue = multiprocessing.Queue()
