@@ -22,6 +22,15 @@ Topic names for Kafka have a common configurable prefix. The rest of
 the topic name for the CrayTelemetry data is "craytelemetry", and the
 rest of the topic name for normal Alerts is "crayevents".
 
+DFTF is made up of two main daemons: dftfd and dftfd_subscriber.
+
+dftfd sets up an http server, processes incoming redfish (and slinghost FA/FMN)
+alert messages, and publishes metrics to kafka topics.
+
+dftfd_subscriber connects to Redfish servers at regular intervals, creating
+or refreshing redfish subscriptions that point to the various dftfd that
+you have set up on your system.
+
 See the dftfd.yaml.example and dftfd_subscriber.yaml.example for example
 configurations.
 
