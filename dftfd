@@ -532,7 +532,7 @@ def process_cray_telemetry(client_ip, event, producer, serializer):
         # then having to wait for the next data point which might cause a gap
         # in the data collection.
         jitter_allowance_ms = 250
-        if delta < (cache.sample_period_ms + jitter_allowance_ms):
+        if delta < (cache.sample_period_ms - jitter_allowance_ms):
             logger.log(DEBUG3, f'skipping CrayTelemetry client_ip {client_ip}, sensor {sensor_name}, last_ms {last_ms}, current_ms {current_ms}, sample_period {cache.sample_period_ms}')
             # The sample period for this sensor has not yet elapsed. Skip this data point.
             continue
